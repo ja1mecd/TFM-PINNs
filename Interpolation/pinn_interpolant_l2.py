@@ -12,9 +12,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # Function to approximate using the PINN
-f = lambda x: (x-1/2)**2
+f = lambda x: np.sin(np.pi*x)
 
-interval = [-1, 1]
+interval = [0, 5]
 a = interval[0]
 b = interval[1]
 
@@ -199,7 +199,7 @@ class PINN_L2_Minimizer:
 
         # Plot 3: Loss history
         epochs = np.arange(1, len(self.losses) + 1)
-        axes[1, 0].semilogy(epochs, self.losses, 'b-', linewidth=2, label="Loss")
+        axes[1, 0].loglog(epochs, self.losses, 'b-', linewidth=2, label="Loss")
         axes[1, 0].set_title("Training Loss & L2 Error")
         axes[1, 0].set_xlabel("Epoch")
         axes[1, 0].set_ylabel("Loss (log scale)")
@@ -216,7 +216,7 @@ class PINN_L2_Minimizer:
         # Plot 4: Loss rate of change (to visualize convergence)
         if len(self.losses) > 1:
             loss_changes = np.abs(np.diff(self.losses))
-            axes[1, 1].semilogy(loss_changes, 'g-', linewidth=1, alpha=0.7)
+            axes[1, 1].loglog(loss_changes, 'g-', linewidth=1, alpha=0.7)
             # Add moving average
             window = min(50, len(loss_changes)//10)
             if window > 1:
