@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
-from pinn_l2_model import NeuralNetwork, PINN_L2_Minimizer   # adjust filename if needed
+from pinn_interpolant_l2 import NeuralNetwork, PINN_L2_Minimizer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

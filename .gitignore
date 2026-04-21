@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editors
+.vscode/
+.idea/
+
+# Training artifacts that are reproducible from the scripts
+# (Keep final `.pth` under each module's `models/` folder — those are
+#  the canonical trained checkpoints referenced by the thesis.)
+*.log
+*.tmp

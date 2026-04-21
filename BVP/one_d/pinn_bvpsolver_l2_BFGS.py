@@ -17,20 +17,22 @@ print(f"Using device: {device}")
 # Example: exact solution u(x) = sin(pi x)
 # Then u''(x) = -pi^2 sin(pi x), with u(0)=0, u(1)=0
 
-interval = [0.25, 1]
+interval = [0.0, 1]
 a, b = interval
+
 
 def f(x):
     if isinstance(x, torch.Tensor):
-        return 2.0 + x - x
+        return -torch.sin(x)
     else:
-        return 2.0 + x - x
+        return -np.sin(x)
 
 
 def u_exact(x):
-    return (x-1/2)**2
+    return np.sin(x)
 
-alpha, beta = u_exact(a), u_exact(b)   # boundary values u(a), u(b)
+
+alpha, beta = u_exact(a), u_exact(b)  # boundary values u(a), u(b)
 
 
 # -------------------------------------------------------------------------
@@ -56,10 +58,109 @@ class NeuralNetwork(nn.Module):
 
 
 # -------------------------------------------------------------------------
+# BFGS OPTIMIZER (FROM SCRATCH)
+# -------------------------------------------------------------------------
+class BFGSOptimizer(optim.Optimizer):
+    def __init__(
+        self,
+        params,
+        lr=1.0,
+        line_search=True,
+        c1=1e-4,
+        tau=0.5,
+        max_ls=20,
+        damping=1e-10,
+    ):
+        defaults = dict(
+            lr=lr,
+            line_search=line_search,
+            c1=c1,
+            tau=tau,
+            max_ls=max_ls,
+            damping=damping,
+        )
+        super().__init__(params, defaults)
+        self.H = None
+
+    def _get_param_vector(self):
+        return torch.cat([p.data.view(-1) for group in self.param_groups for p in group["params"]])
+
+    def _set_param_vector(self, vec):
+        offset = 0
+        for group in self.param_groups:
+            for p in group["params"]:
+                numel = p.numel()
+                p.data.copy_(vec[offset : offset + numel].view_as(p))
+                offset += numel
+
+    def _get_grad_vector(self):
+        grads = []
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    grads.append(torch.zeros_like(p.data).view(-1))
+                else:
+                    grads.append(p.grad.data.view(-1))
+        return torch.cat(grads)
+
+    def step(self, closure, loss_eval):
+        loss = closure()
+        g = self._get_grad_vector().detach()
+        x = self._get_param_vector().detach()
+
+        n_params = g.numel()
+        if self.H is None or self.H.shape[0] != n_params:
+            self.H = torch.eye(n_params, device=g.device, dtype=g.dtype)
+
+        p_dir = -self.H.matmul(g)
+        group = self.param_groups[0]
+        lr = group["lr"]
+        line_search = group["line_search"]
+        c1 = group["c1"]
+        tau = group["tau"]
+        max_ls = group["max_ls"]
+        damping = group["damping"]
+        alpha = lr
+
+        if line_search:
+            gTp = torch.dot(g, p_dir).item()
+            f0 = loss.item()
+            for _ in range(max_ls):
+                new_x = x + alpha * p_dir
+                self._set_param_vector(new_x)
+                f_new = loss_eval().item()
+                if f_new <= f0 + c1 * alpha * gTp:
+                    break
+                alpha *= tau
+            else:
+                alpha = 0.0
+
+        s = alpha * p_dir
+        new_x = x + s
+        self._set_param_vector(new_x)
+
+        new_loss = closure()
+        g_new = self._get_grad_vector().detach()
+        y = g_new - g
+        ys = torch.dot(y, s)
+
+        if ys > damping:
+            rho = 1.0 / ys
+            I = torch.eye(n_params, device=g.device, dtype=g.dtype)
+            syT = torch.outer(s, y)
+            ysT = torch.outer(y, s)
+            self.H = (I - rho * syT) @ self.H @ (I - rho * ysT) + rho * torch.outer(s, s)
+        else:
+            self.H = torch.eye(n_params, device=g.device, dtype=g.dtype)
+
+        return new_loss
+
+
+# -------------------------------------------------------------------------
 # PINN FOR BVP: ENFORCE u'' ~ f AND BOUNDARY CONDITIONS
 # -------------------------------------------------------------------------
 class PINN_BVP_Solver:
-    def __init__(self, model, lr=1e-3, lambda_bc=10.0, lambda_pde = 1.0):
+    def __init__(self, model, lr=1e-3, lambda_bc=10.0, lambda_pde=1.0):
         """
         Parameters
         ----------
@@ -71,39 +172,41 @@ class PINN_BVP_Solver:
             Weight of boundary-condition loss in the total loss.
         """
         self.model = model.to(device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.adam_optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        self.bfgs_optimizer = BFGSOptimizer(self.model.parameters(), lr=lr)
+        self.optimizer = self.adam_optimizer
         self.lambda_bc = lambda_bc
         self.lambda_pde = lambda_pde
 
-        self.losses = []             # total loss (PDE + BC)
-        self.pde_losses = []         # PDE residual loss
-        self.bc_losses = []          # boundary loss
-        self.pde_l2_errors = []      # L2 norm of PDE residual
-        self.solution_l2_errors = [] # L2 norm of solution error (u_NN - u_exact)
+        self.losses = []  # total loss (PDE + BC)
+        self.val_losses = []  # validation loss
+        self.pde_losses = []  # PDE residual loss
+        self.bc_losses = []  # boundary loss
+        self.pde_l2_errors = []  # L2 norm of PDE residual
+        self.solution_l2_errors = []  # L2 norm of solution error (u_NN - u_exact)
 
         self.best_model_state = None
         self.best_loss = float("inf")
+
+    # ------------------- hard-enforced solution -------------------
+    def _u_hat(self, x):
+        base = alpha * (b - x) / (b - a) + beta * (x - a) / (b - a)
+        return base + (x - a) * (b - x) * self.model(x)
 
     # ------------------- core loss components -------------------
     def _pde_residual(self, x_interior):
         x_interior = x_interior.to(device)
         x_interior.requires_grad_(True)
 
-        u = self.model(x_interior)
+        u = self._u_hat(x_interior)
         # First derivative u_x
         u_x = torch.autograd.grad(
-            u,
-            x_interior,
-            grad_outputs=torch.ones_like(u),
-            create_graph=True
+            u, x_interior, grad_outputs=torch.ones_like(u), create_graph=True
         )[0]
 
         # Second derivative u_xx
         u_xx = torch.autograd.grad(
-            u_x,
-            x_interior,
-            grad_outputs=torch.ones_like(u_x),
-            create_graph=True
+            u_x, x_interior, grad_outputs=torch.ones_like(u_x), create_graph=True
         )[0]
 
         # Right-hand side f(x)
@@ -111,19 +214,30 @@ class PINN_BVP_Solver:
         r = u_xx - f_vals
         return r
 
-    def compute_loss(self, n_collocation_points=100):
+    def compute_loss(self, x_interior=None, n_collocation_points=100):
+        """Compute total loss = lambda_pde * PDE-loss + lambda_bc * BC-loss.
+
+        Notes
+        -----
+        If `x_interior` is reused across epochs (as in block-resampling), we create a fresh
+        leaf tensor each call via detach().clone().requires_grad_(True). This prevents
+        accumulating gradients on the collocation-point tensor itself.
+        """
+
         # Interior collocation points
-        x_interior = torch.FloatTensor(n_collocation_points, 1).uniform_(a, b).to(device)
-        x_interior.requires_grad_(True)
+        if x_interior is None:
+            x_interior = torch.empty(n_collocation_points, 1, device=device).uniform_(a, b)
+        else:
+            x_interior = x_interior.to(device)
+
+        # IMPORTANT: make a fresh leaf tensor each call (prevents .grad accumulation on reused points)
+        x_interior = x_interior.detach().clone().requires_grad_(True)
 
         r = self._pde_residual(x_interior)
-        loss_pde = torch.mean(r ** 2) * (b - a)  # scale by interval length
+        loss_pde = torch.mean(r**2) * (b - a)  # scale by interval length
 
         # Boundary points (fixed)
-        x_bc = torch.tensor([[a], [b]], dtype=torch.float32, device=device)
-        u_bc = self.model(x_bc)
-        target_bc = torch.tensor([[alpha], [beta]], dtype=torch.float32, device=device)
-        loss_bc = torch.mean((u_bc - target_bc) ** 2)
+        loss_bc = torch.zeros((), device=device)
 
         loss_total = self.lambda_pde * loss_pde + self.lambda_bc * loss_bc
         return loss_total, loss_pde.detach(), loss_bc.detach()
@@ -134,26 +248,20 @@ class PINN_BVP_Solver:
         x_torch = torch.FloatTensor(x_test.reshape(-1, 1)).to(device)
         x_torch.requires_grad_(True)
 
-        u = self.model(x_torch)
+        u = self._u_hat(x_torch)
 
         u_x = torch.autograd.grad(
-            u,
-            x_torch,
-            grad_outputs=torch.ones_like(u),
-            create_graph=True
+            u, x_torch, grad_outputs=torch.ones_like(u), create_graph=True
         )[0]
         u_xx = torch.autograd.grad(
-            u_x,
-            x_torch,
-            grad_outputs=torch.ones_like(u_x),
-            create_graph=False
+            u_x, x_torch, grad_outputs=torch.ones_like(u_x), create_graph=False
         )[0]
 
         u_xx_np = u_xx.detach().cpu().numpy().flatten()
         f_np = f(x_test)
         residual = u_xx_np - f_np
 
-        l2_norm = np.sqrt(np.trapz(residual ** 2, x_test))
+        l2_norm = np.sqrt(np.trapz(residual**2, x_test))
         return l2_norm
 
     def compute_solution_l2_norm(self, n_points=500):
@@ -168,38 +276,153 @@ class PINN_BVP_Solver:
         # NN approximation
         x_torch = torch.FloatTensor(x_test.reshape(-1, 1)).to(device)
         with torch.no_grad():
-            u_pred = self.model(x_torch).cpu().numpy().flatten()
+            u_pred = self._u_hat(x_torch).cpu().numpy().flatten()
 
         diff = u_pred - u_true
         l2_norm = np.sqrt(np.trapz(diff**2, x_test))
         return l2_norm
 
     # ------------------- training -------------------
-    def train(self, n_epochs=20000, n_collocation_points=200, verbose_freq=1000, patience=500, 
-              min_delta=1e-7, moving_avg_window=20, pde_l2_points=200):
+    def train(
+        self,
+        n_epochs=20000,
+        n_collocation_points=200,
+        verbose_freq=1000,
+        patience=500,
+        min_delta=1e-7,
+        moving_avg_window=20,
+        pde_l2_points=200,
+        train_split=0.7,
+        scheduler_patience=200,
+        scheduler_threshold=1e-4,
+        scheduler_gamma=0.9,
+        scheduler_min_lr=1e-6,
+        resample_every=500,
+        adam_epochs=2000,
+    ):
         print("\nStarting PINN training for BVP u''(x)=f(x)...")
         print(f"Domain: [{a}, {b}], BC: u(a)={alpha}, u(b)={beta}")
         print(f"lambda_bc = {self.lambda_bc}")
         print(f"lambda_pde = {self.lambda_pde}")
         print("-" * 60)
 
+        self.best_model_state = None
+        self.best_loss = float("inf")
+        self.losses.clear()
+        self.val_losses.clear()
+        self.pde_losses.clear()
+        self.bc_losses.clear()
+        self.pde_l2_errors.clear()
+        self.solution_l2_errors.clear()
+
+        if not (0.0 < train_split < 1.0):
+            raise ValueError("train_split must be between 0 and 1 (exclusive).")
+        if n_collocation_points < 2:
+            raise ValueError(
+                "n_collocation_points must be at least 2 to allow a validation split."
+            )
+        if resample_every < 1:
+            raise ValueError("resample_every must be >= 1.")
+        if adam_epochs < 0 or adam_epochs >= n_epochs:
+            raise ValueError("adam_epochs must be >= 0 and < n_epochs.")
+
+        # Train/validation split size (fixed)
+        n_train = int(n_collocation_points * train_split)
+        n_train = min(max(n_train, 1), n_collocation_points - 1)
+
+        def resample_collocation_block():
+            """Sample a fresh uniform block of collocation points and split into train/val."""
+            x_all = torch.empty(n_collocation_points, 1, device=device).uniform_(a, b)
+            # shuffle to avoid any ordering artefacts
+            perm = torch.randperm(n_collocation_points, device=device)
+            x_all = x_all[perm]
+            x_train_block = x_all[:n_train].detach().clone()
+            x_val_block = x_all[n_train:].detach().clone()
+            return x_train_block, x_val_block
+
+        # Initial block
+        x_train_block, x_val_block = resample_collocation_block()
+
+        # Learning-rate schedulers with exponential decay triggered on plateau
+        self.adam_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.adam_optimizer,
+            mode="min",
+            factor=scheduler_gamma,
+            patience=scheduler_patience,
+            threshold=scheduler_threshold,
+            verbose=True,
+            min_lr=scheduler_min_lr,
+        )
+        self.bfgs_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.bfgs_optimizer,
+            mode="min",
+            factor=scheduler_gamma,
+            patience=scheduler_patience,
+            threshold=scheduler_threshold,
+            verbose=True,
+            min_lr=scheduler_min_lr,
+        )
+
         epochs_without_improvement = 0
         moving_avg_losses = []
         actual_epochs = 0
 
         for epoch in range(1, n_epochs + 1):
-            self.optimizer.zero_grad()
-            loss_total, loss_pde, loss_bc = self.compute_loss(
-                n_collocation_points=n_collocation_points
-            )
-            loss_total.backward()
-            self.optimizer.step()
+            # Resample collocation block every `resample_every` epochs
+            if epoch != 1 and ((epoch - 1) % resample_every == 0):
+                x_train_block, x_val_block = resample_collocation_block()
+
+            if epoch <= adam_epochs:
+                self.optimizer = self.adam_optimizer
+                scheduler = self.adam_scheduler
+            else:
+                self.optimizer = self.bfgs_optimizer
+                scheduler = self.bfgs_scheduler
+
+            if self.optimizer is self.adam_optimizer:
+                self.optimizer.zero_grad()
+                loss_total, loss_pde, loss_bc = self.compute_loss(
+                    x_interior=x_train_block, n_collocation_points=n_collocation_points
+                )
+                loss_total.backward()
+                self.optimizer.step()
+            else:
+                loss_parts = {}
+
+                def closure():
+                    self.optimizer.zero_grad()
+                    loss_total, loss_pde, loss_bc = self.compute_loss(
+                        x_interior=x_train_block,
+                        n_collocation_points=n_collocation_points,
+                    )
+                    loss_parts["pde"] = loss_pde
+                    loss_parts["bc"] = loss_bc
+                    loss_total.backward()
+                    return loss_total
+
+                def loss_eval():
+                    loss_total, _, _ = self.compute_loss(
+                        x_interior=x_train_block,
+                        n_collocation_points=n_collocation_points,
+                    )
+                    return loss_total
+
+                loss_total = self.optimizer.step(closure, loss_eval)
+                loss_pde = loss_parts["pde"]
+                loss_bc = loss_parts["bc"]
+
+            # Validation loss (no optimizer step)
+            with torch.set_grad_enabled(True):
+                val_loss, _, _ = self.compute_loss(
+                    x_interior=x_val_block, n_collocation_points=x_val_block.shape[0]
+                )
 
             # Log
             loss_value = loss_total.item()
             self.losses.append(loss_value)
             self.pde_losses.append(loss_pde.item())
             self.bc_losses.append(loss_bc.item())
+            self.val_losses.append(val_loss.item())
 
             # PDE residual L2 norm for monitoring
             pde_l2 = self.compute_pde_l2_norm(n_points=pde_l2_points)
@@ -215,12 +438,12 @@ class PINN_BVP_Solver:
             actual_epochs = epoch
 
             # Moving average for early stopping
-            moving_avg_losses.append(loss_value)
+            moving_avg_losses.append(val_loss.item())
             if len(moving_avg_losses) > moving_avg_window:
                 moving_avg_losses.pop(0)
             moving_avg = np.mean(moving_avg_losses)
 
-            # Early stopping check on moving average
+            # Early stopping check on validation moving average
             if moving_avg + min_delta < self.best_loss:
                 self.best_loss = moving_avg
                 self.best_model_state = {
@@ -230,18 +453,24 @@ class PINN_BVP_Solver:
             else:
                 epochs_without_improvement += 1
 
+            # Scheduler step on validation loss
+            scheduler.step(val_loss.item())
+
             # Verbose output
             if epoch % verbose_freq == 0:
+                current_lr = self.optimizer.param_groups[0]["lr"]
                 print(
                     f"Epoch {epoch:6d} | "
                     f"Loss: {loss_value:.4e} | "
+                    f"Val: {val_loss.item():.4e} | "
                     f"PDE: {loss_pde.item():.4e} | "
                     f"BC: {loss_bc.item():.4e} | "
-                    f"||u''-f||_L2: {pde_l2:.4e}"
+                    f"LR: {current_lr:.2e} | "
+                    f"||u''-f||_L2: {pde_l2:.4e} "
                     f"||u_NN-u_exact||_L2: {sol_l2:.4e}"
                 )
 
-            if epochs_without_improvement >= patience:
+            if epoch > adam_epochs and epochs_without_improvement >= patience:
                 print(f"\nEarly stopping at epoch {epoch}")
                 print(f"No improvement in moving average loss for {patience} epochs.")
                 break
@@ -249,7 +478,9 @@ class PINN_BVP_Solver:
         # Restore best model
         if self.best_model_state is not None:
             self.model.load_state_dict(self.best_model_state)
-            print(f"\nLoaded best model with moving-average loss: {self.best_loss:.6e}")
+            print(
+                f"\nLoaded best model with moving-average loss: {self.best_loss:.6e}"
+            )
 
         print("-" * 60)
         print(f"Training completed: {actual_epochs} / {n_epochs} epochs.")
@@ -264,11 +495,12 @@ class PINN_BVP_Solver:
             x_test.reshape(-1, 1),
             dtype=torch.float32,
             device=device,
-            requires_grad=True
+            requires_grad=True,
         )
 
         # Forward pass u_NN(x)
-        u = self.model(x_torch)                 # shape (N,1)
+        u = self.model(x_torch)  # shape (N,1)
+        u = self._u_hat(x_torch)
         u_pred = u.detach().cpu().numpy().flatten()
 
         # Exact solution (if available)
@@ -283,18 +515,12 @@ class PINN_BVP_Solver:
 
         # First derivative u_x
         u_x = torch.autograd.grad(
-            u,
-            x_torch,
-            grad_outputs=torch.ones_like(u),
-            create_graph=True
+            u, x_torch, grad_outputs=torch.ones_like(u), create_graph=True
         )[0]
 
         # Second derivative u_xx
         u_xx = torch.autograd.grad(
-            u_x,
-            x_torch,
-            grad_outputs=torch.ones_like(u_x),
-            create_graph=False
+            u_x, x_torch, grad_outputs=torch.ones_like(u_x), create_graph=False
         )[0]
 
         u_xx_np = u_xx.detach().cpu().numpy().flatten()
@@ -309,14 +535,16 @@ class PINN_BVP_Solver:
         ax = axes[0, 0]
         if have_exact:
             ax.plot(
-                x_test, u_true,
+                x_test,
+                u_true,
                 "b-",
                 linewidth=2,
                 label=r"$u_{\mathrm{exact}}(x)$",
                 zorder=1,
             )
         ax.plot(
-            x_test, u_pred,
+            x_test,
+            u_pred,
             "r--",
             linewidth=2,
             label=r"$u_{\mathrm{NN}}(x)$",
@@ -333,14 +561,16 @@ class PINN_BVP_Solver:
         # =========================================================
         ax = axes[0, 1]
         ax.plot(
-            x_test, f_np,
+            x_test,
+            f_np,
             "k-",
             linewidth=2,
             label=r"$f(x)$",
             zorder=1,
         )
         ax.plot(
-            x_test, u_xx_np,
+            x_test,
+            u_xx_np,
             "g--",
             linewidth=2,
             label=r"$u_{\mathrm{NN}}''(x)$",
@@ -381,6 +611,16 @@ class PINN_BVP_Solver:
                 linewidth=1,
                 label="BC loss",
                 zorder=1,
+            )
+        if self.val_losses:
+            epochs_val = np.arange(1, len(self.val_losses) + 1)
+            ax.semilogy(
+                epochs_val,
+                self.val_losses,
+                "r:",
+                linewidth=1,
+                label="Val loss",
+                zorder=4,
             )
         ax.set_title("Training losses (log scale)")
         ax.set_xlabel("Epoch")
@@ -440,17 +680,18 @@ class PINN_BVP_Solver:
             arr = np.asarray(x, dtype=float)
             x_tensor = torch.from_numpy(arr.reshape(-1, 1)).float().to(device)
             with torch.no_grad():
-                y_tensor = self.model(x_tensor)
+                y_tensor = self._u_hat(x_tensor)
             y_numpy = y_tensor.cpu().numpy().reshape(-1)
             return y_numpy if arr.ndim > 0 else float(y_numpy.item())
+
         return NN
 
-    def save_model(self, filepath="models/pinn_bvp_model.pth"):
+    def save_model(self, filepath="../models/pinn_bvp_model.pth"):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         torch.save(self.model.state_dict(), filepath)
         print(f"Model saved to {filepath}")
 
-    def load_model(self, filepath="models/pinn_bvp_model.pth"):
+    def load_model(self, filepath="../models/pinn_bvp_model.pth"):
         state_dict = torch.load(filepath, map_location=device)
         self.model.load_state_dict(state_dict)
         self.model.to(device)
@@ -461,27 +702,34 @@ class PINN_BVP_Solver:
 # MAIN
 # -------------------------------------------------------------------------
 def main():
-    model = NeuralNetwork(hidden_layers=[32, 32, 32], activation=nn.Sigmoid())
+    model = NeuralNetwork(hidden_layers=[32, 32, 32], activation=nn.Tanh())
     print("\nNeural Network Architecture:\n")
     print(model, "\n")
 
-    pinn = PINN_BVP_Solver(model, lr=1e-3, lambda_bc=10.0, lambda_pde = 1)
+    pinn = PINN_BVP_Solver(model, lr=1e-3, lambda_bc=10.0, lambda_pde=1)
 
     pinn.train(
-        n_epochs=20000,
-        n_collocation_points=200,
+        n_epochs=5000,
+        n_collocation_points=500,  # <- 500 uniform points per block
         verbose_freq=1000,
-        patience=200,
+        patience=5000,
         min_delta=1e-7,
         moving_avg_window=20,
         pde_l2_points=2000,
+        train_split=0.7,
+        scheduler_patience=5000,
+        scheduler_threshold=1e-4,
+        scheduler_gamma=0.9,
+        scheduler_min_lr=1e-6,
+        resample_every=500,
+        adam_epochs = 2000# <- keep same block for 500 epochs, then resample
     )
 
     pinn.plot_results()
 
     # Save & reload example
-    pinn.save_model("models/pinn_bvp_model.pth")
-    pinn.load_model("models/pinn_bvp_model.pth")
+    pinn.save_model("../models/pinn_bvp_model.pth")
+    pinn.load_model("../models/pinn_bvp_model.pth")
 
     # Test approximant
     NN = pinn.get_approximant()
