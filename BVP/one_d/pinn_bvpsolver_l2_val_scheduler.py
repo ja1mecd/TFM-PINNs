@@ -3,7 +3,13 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import matplotlib
+matplotlib.use("Agg")  # headless backend (SSH / no display)
 import matplotlib.pyplot as plt
+import os
+
+FIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
+os.makedirs(FIG_DIR, exist_ok=True)
 
 # -------------------------------------------------------------------------
 # DEVICE
@@ -428,7 +434,10 @@ class PINN_BVP_Solver:
         ax.legend()
 
         plt.tight_layout()
-        plt.show()
+        out_path = os.path.join(FIG_DIR, "pinn_bvpsolver_l2_val_scheduler.png")
+        plt.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"Saved figure: {out_path}")
 
 # -------------------------------------------------------------------------
 # MAIN

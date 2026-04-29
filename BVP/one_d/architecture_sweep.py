@@ -1,5 +1,7 @@
 import argparse
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # headless backend (SSH / no display)
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
