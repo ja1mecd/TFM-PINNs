@@ -11,10 +11,11 @@ import inspect
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# Function to approximate using the PINN
-f = lambda x: np.sin(np.pi*x)
+# Function to approximate using the PINN.
+# Thesis section 4.1: "smooth scalar target f(x) on a bounded interval".
+f = lambda x: (x - 0.5) ** 2
 
-interval = [0, 5]
+interval = [-1.0, 1.0]
 a = interval[0]
 b = interval[1]
 
@@ -62,7 +63,7 @@ class PINN_L2_Minimizer:
         return loss
 
     def compute_exact_l2_norm(self, n_points=1000):
-        """Compute exact L2 norm via dense numerical integration."""
+        """Compute L2 error via dense trapezoidal quadrature."""
         x_test = np.linspace(a, b, n_points)
         x_test_torch = torch.FloatTensor(x_test.reshape(-1, 1)).to(device)
 
@@ -73,6 +74,21 @@ class PINN_L2_Minimizer:
             squared_diff = (nn_values - target_values)**2
             l2_norm = np.sqrt(np.trapz(squared_diff, x_test))
         return l2_norm
+
+    def compute_linf_error(self, n_points=2000):
+        """Compute the L-infinity error on a dense validation grid.
+
+        Used by the architecture sweep in `error_table_pinn.py`, which is
+        the script that produces the Tanh / Sigmoid / ReLU / Softmax
+        heatmaps cited in section 4.1 of the thesis.
+        """
+        x_test = np.linspace(a, b, n_points)
+        x_test_torch = torch.FloatTensor(x_test.reshape(-1, 1)).to(device)
+
+        with torch.no_grad():
+            nn_values = self.model(x_test_torch).cpu().numpy().flatten()
+            target_values = f(x_test)
+            return float(np.max(np.abs(nn_values - target_values)))
 
     def train(self, n_epochs=5000, n_collocation_points=100, verbose_freq=500, 
               patience=50, min_delta=1e-6, moving_avg_window=10, l2_points=200):
@@ -170,7 +186,7 @@ class PINN_L2_Minimizer:
     # ---------------------------------------------------------------------
     # Plot results with convergence analysis
     # ---------------------------------------------------------------------
-    def plot_results(self):
+    def plot_results(self, save_path: str | None = None, show: bool = True):
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
         x_test = np.linspace(a, b, 200)
         x_test_torch = torch.FloatTensor(x_test.reshape(-1, 1)).to(device)
@@ -230,7 +246,16 @@ class PINN_L2_Minimizer:
             axes[1, 1].legend()
 
         plt.tight_layout()
-        plt.show()
+
+        if save_path is not None:
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            fig.savefig(save_path, dpi=200)
+            print(f"Saved results figure to {save_path}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
 
         final_l2_norm = self.compute_exact_l2_norm()
         print(f"Final L2 Norm: {final_l2_norm:.6f}")
@@ -244,7 +269,11 @@ class PINN_L2_Minimizer:
 # MAIN ROUTINE
 # -------------------------------------------------------------------------
 def main():
-    model = NeuralNetwork(hidden_layers=[32, 32, 32], activation=nn.ReLU())
+    # Winning configuration from the cross-activation architecture sweep
+    # (section 4.1 of the thesis): ReLU achieves the lowest L-infinity error
+    # at (L = 2, W = 80). Tanh remains the baseline for the PDE experiments
+    # in subsequent sections, where derivative regularity is what matters.
+    model = NeuralNetwork(hidden_layers=[80, 80], activation=nn.ReLU())
     print("\nNeural Network Architecture:\n")
     print(model, "\n")
 
@@ -260,7 +289,7 @@ def main():
         moving_avg_window=20  # Average over 20 epochs for stability
     )
     
-    pinn.plot_results()
+    pinn.plot_results(save_path="figures/pinn_interpolant_l2.png", show=False)
 
     # Save and test loading
     pinn.save_model("models/pinn_l2_model.pth")

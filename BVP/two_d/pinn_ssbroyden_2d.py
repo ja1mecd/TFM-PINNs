@@ -1,82 +1,174 @@
 """
-CFGS PINN with objective transform:
-  - raw functional:      J >= 0
-  - optimized objective: can be
-        identity:  J
-        sqrt:      (J + eps)^(1/2)
-        root:      (J + eps)^(1/n)     <-- NEW: n-th root (generalizes sqrt)
-        log:       log(J + eps)
+Current-Free Grad-Shafranov (CFGS) PINN — replication of section 4.1 of
 
-PDE (charge-free / vacuum Grad–Shafranov):
-    Δ*ψ = ψ_RR - (1/R) ψ_R + ψ_ZZ = 0    on (R,Z) ∈ [Rmin,Rmax]×[Zmin,Zmax], with Rmin > 0.
+    Urbán, Stefanou & Pons, "Unveiling the optimization process of
+    physics informed neural networks: How accurate and competitive can
+    PINNs be?", J. Comp. Phys. 523, 113656 (2025).
 
-Boundary conditions:
-  - Enforced "hard" via ansatz ψ_hat = ψ_bc + g(R,Z) * NN(R,Z), where g=0 on the box boundary.
-  - In this demo, ψ_bc = ψ_exact and ψ_exact(R,Z)=R^2 (exactly satisfies Δ*ψ=0).
+Equation (eq. 28 of the paper, with T = 0):
 
-Optimizers:
-  - Adam for `adam_epochs`
-  - then dense Self-Scaled Broyden (SSBroyden) for remaining epochs
+    Delta_GS P = 0,
 
-IMPORTANT:
-  Dense SSBroyden stores H ∈ R^{n×n} (n=#parameters) => O(n^2) memory.
-  If you get OOM, reduce network size or set `ssbroyden_H_on_cpu=True`.
+where (eq. 29, in compactified spherical coordinates q = 1/r, mu = cos(theta))
+
+    Delta_GS = q^2 ( q^2 d^2/dq^2 + 2 q d/dq ) + q^2 (1 - mu^2) d^2/dmu^2
+             = q^4 P_qq + 2 q^3 P_q + q^2 (1 - mu^2) P_mumu.
+
+Domain (Table 1): (q, mu) in [0, 1] x [-1, 1].
+
+Analytic solution (eq. 32):
+
+    P_an(q, mu) = (1 - mu^2) * sum_{l=1}^{lmax} q^l * b_l * P'_l(mu),
+
+where P'_l is the derivative of the Legendre polynomial. This script uses the
+"dipole + quadrupole" case mentioned in section 4.1 (b_1 != 0, b_2 != 0, all
+others zero). The coefficients b_l are free parameters controlling the
+surface field; the paper does not fix specific values, so we choose a simple
+dipole-dominated pair (b_1 = 1, b_2 = 1) as a default.
+
+Hard enforcement of Dirichlet BCs (eqs. 30-31):
+
+    P(q, mu) = f_b(q, mu) + h_b(q, mu) * N(q, mu; theta),
+    f_b     = q * (1 - mu^2) * sum_l b_l * P'_l(mu),
+    h_b     = q * (q - 1) * (1 - mu^2),
+
+so that P vanishes on the axis (mu = +/- 1) and at infinity (q = 0), and
+equals the prescribed surface data at q = 1.
+
+Training pipeline (paper, Table 1 CFGS):
+    - tanh activations
+    - Layers: 1, Neurons: 30
+    - Adam for 2000 iterations, then quasi-Newton for 3000 more (total 5000)
+    - Batch (collocation) size: 1000; training set refreshed every 500 iters
+    - Loss: MSE of the PDE residual over the interior
+
+This script exposes two knobs for the paper's headline sweep:
+    --variant       one of {"bfgs", "ssbfgs", "ssbroyden"}
+    --loss_transform one of {"identity", "sqrt", "log"}
+
+which together reproduce the combinations in Table 2 of the paper.
 """
 
+from __future__ import annotations
+
+import json
 import os
+import sys
+import time
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import matplotlib.pyplot as plt
+import matplotlib
+
+matplotlib.use("Agg")  # headless: no display needed on the remote server
+import matplotlib.pyplot as plt  # noqa: E402
+
+# Make the shared optimizer importable when running `python pinn_ssbroyden_2d.py`
+# from this directory (BVP/two_d/).
+_OPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "optimizers")
+if _OPT_DIR not in sys.path:
+    sys.path.insert(0, _OPT_DIR)
+from ssbroyden import SSBroydenOptimizer  # noqa: E402
 
 
 # =============================================================================
-# DEVICE + performance knobs
+# DEVICE
 # =============================================================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 if device.type == "cuda":
-    _ = torch.zeros(1, device=device)  # initialize CUDA context early
+    _ = torch.zeros(1, device=device)
     try:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-    except Exception:
-        pass
-    try:
         torch.set_float32_matmul_precision("high")
     except Exception:
         pass
 
 
 # =============================================================================
-# CFGS DOMAIN (R,Z). IMPORTANT: Rmin > 0 to avoid the 1/R singularity.
+# PROBLEM SETUP: CFGS in compactified spherical (q, mu)
 # =============================================================================
-Rmin, Rmax = 1.0, 2.0
-Zmin, Zmax = -1.0, 1.0
+q_min, q_max = 0.0, 1.0
+mu_min, mu_max = -1.0, 1.0
+
+# Dipole-quadrupole surface coefficients b_l for l = 1, ..., lmax.
+# Paper: "we focus on a dipole-quadrupole solution (b_1, b_2 != 0, b_{l>2} = 0)".
+# Specific values are a free parameter; we pick a dipole-dominated pair.
+B_COEFFS = (1.0, 1.0)
+
+
+def legendre_derivatives(mu: torch.Tensor, lmax: int) -> list[torch.Tensor]:
+    """Return [P'_1(mu), P'_2(mu), ..., P'_lmax(mu)] using the stable recursion
+
+        P_0  = 1,  P_1 = mu,
+        P_l  = ((2l-1) mu P_{l-1} - (l-1) P_{l-2}) / l,
+        P'_l = (l / (mu^2 - 1)) * (mu P_l - P_{l-1})  for mu^2 != 1.
+
+    To avoid the singularity at mu = +/-1 we use the equivalent form
+
+        P'_l = l * (P_{l-1} - mu * P_l) / (1 - mu^2 + eps)
+
+    with a small epsilon clamp. Returns a list of tensors of the same shape as mu.
+    """
+    eps = 1e-12
+    P = [torch.ones_like(mu), mu.clone()]
+    for l in range(2, lmax + 1):
+        P_next = ((2 * l - 1) * mu * P[l - 1] - (l - 1) * P[l - 2]) / l
+        P.append(P_next)
+
+    one_minus_mu2 = torch.clamp(1.0 - mu**2, min=eps)
+    derivs: list[torch.Tensor] = []
+    for l in range(1, lmax + 1):
+        dP = l * (P[l - 1] - mu * P[l]) / one_minus_mu2
+        derivs.append(dP)
+    return derivs
+
+
+def _surface_sum(mu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
+    """Return sum_l b_l * P'_l(mu)."""
+    derivs = legendre_derivatives(mu, lmax=len(b_coeffs))
+    total = torch.zeros_like(mu)
+    for b, dP in zip(b_coeffs, derivs):
+        total = total + b * dP
+    return total
+
+
+def P_exact(qmu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
+    """Analytic current-free solution (paper eq. 32)."""
+    q = qmu[:, 0:1]
+    mu = qmu[:, 1:2]
+    derivs = legendre_derivatives(mu, lmax=len(b_coeffs))
+    poly = torch.zeros_like(q)
+    for l, (b, dP) in enumerate(zip(b_coeffs, derivs), start=1):
+        poly = poly + (q**l) * b * dP
+    return (1.0 - mu**2) * poly
+
+
+def f_b(qmu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
+    """Smooth function satisfying the Dirichlet BCs (paper eq. 30)."""
+    q = qmu[:, 0:1]
+    mu = qmu[:, 1:2]
+    return q * (1.0 - mu**2) * _surface_sum(mu, b_coeffs)
+
+
+def h_b(qmu: torch.Tensor) -> torch.Tensor:
+    """Bubble that vanishes on the boundary of the (q, mu) rectangle (paper eq. 31)."""
+    q = qmu[:, 0:1]
+    mu = qmu[:, 1:2]
+    return q * (q - 1.0) * (1.0 - mu**2)
 
 
 # =============================================================================
-# EXACT SOLUTION / BOUNDARY DATA (demo)
-# ψ(R,Z) = R^2 satisfies Δ*ψ = ψ_RR - (1/R)ψ_R + ψ_ZZ = 2 - 2 + 0 = 0.
-# =============================================================================
-def psi_exact(RZ):
-    if isinstance(RZ, torch.Tensor):
-        R = RZ[:, 0:1]
-        return R**2
-    else:
-        R = RZ[:, 0:1]
-        return R**2
-
-
-# =============================================================================
-# Neural network ψθ(R,Z)
+# Neural network P_theta(q, mu)
 # =============================================================================
 class NeuralNetwork(nn.Module):
-    def __init__(self, hidden_layers=(64, 64, 64), activation=nn.Tanh()):
+    def __init__(self, hidden_layers=(30,), activation=None) -> None:
         super().__init__()
-        layers = []
+        activation = activation if activation is not None else nn.Tanh()
+        layers: list[nn.Module] = []
         in_dim = 2
         for h in hidden_layers:
             layers.append(nn.Linear(in_dim, h))
@@ -85,233 +177,37 @@ class NeuralNetwork(nn.Module):
         layers.append(nn.Linear(in_dim, 1))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 
 # =============================================================================
-# Dense Self-Scaled Broyden optimizer (inverse-Hessian update)
-# =============================================================================
-class SSBroydenOptimizer(optim.Optimizer):
-    """
-    Dense self-scaled Broyden update of inverse Hessian approximation H_k.
-
-    WARNING: O(n^2) memory/time.
-    """
-
-    def __init__(
-        self,
-        params,
-        lr=1.0,
-        line_search=True,
-        c1=1e-4,
-        backtrack=0.5,
-        max_ls=20,
-        damping=1e-12,
-        tau_min=1e-6,
-        tau_max=1.0,
-        reset_on_fail=True,
-        H_on_cpu=False,
-    ):
-        defaults = dict(
-            lr=lr,
-            line_search=line_search,
-            c1=c1,
-            backtrack=backtrack,
-            max_ls=max_ls,
-            damping=damping,
-            tau_min=tau_min,
-            tau_max=tau_max,
-            reset_on_fail=reset_on_fail,
-            H_on_cpu=H_on_cpu,
-        )
-        super().__init__(params, defaults)
-        self.H = None
-
-    def _get_param_vector(self):
-        return torch.cat([p.data.view(-1) for g in self.param_groups for p in g["params"]])
-
-    def _set_param_vector(self, vec):
-        offset = 0
-        for g in self.param_groups:
-            for p in g["params"]:
-                n = p.numel()
-                p.data.copy_(vec[offset : offset + n].view_as(p))
-                offset += n
-
-    def _get_grad_vector(self):
-        grads = []
-        for g in self.param_groups:
-            for p in g["params"]:
-                if p.grad is None:
-                    grads.append(torch.zeros_like(p.data).view(-1))
-                else:
-                    grads.append(p.grad.data.view(-1))
-        return torch.cat(grads)
-
-    @torch.no_grad()
-    def _init_H(self, n, ref_tensor, H_on_cpu: bool):
-        if self.H is None or self.H.shape[0] != n:
-            dev = torch.device("cpu") if H_on_cpu else ref_tensor.device
-            self.H = torch.eye(n, device=dev, dtype=ref_tensor.dtype)
-
-    def step(self, closure, loss_eval):
-        """
-        closure(): zero_grad -> compute objective -> backward -> return objective tensor
-        loss_eval(): compute objective only (no backward), used for line search
-        """
-        group = self.param_groups[0]
-        lr = group["lr"]
-        line_search = group["line_search"]
-        c1 = group["c1"]
-        backtrack = group["backtrack"]
-        max_ls = group["max_ls"]
-        damping = group["damping"]
-        tau_min = group["tau_min"]
-        tau_max = group["tau_max"]
-        reset_on_fail = group["reset_on_fail"]
-        H_on_cpu = group["H_on_cpu"]
-
-        loss = closure()
-        g = self._get_grad_vector().detach()
-        x = self._get_param_vector().detach()
-        n = g.numel()
-        self._init_H(n, g, H_on_cpu)
-
-        if self.H.device != g.device:
-            gH = g.detach().cpu()
-        else:
-            gH = g
-
-        Hg = self.H.matmul(gH)
-        p_dir_H = -Hg
-        p_dir = p_dir_H.to(g.device) if self.H.device != g.device else p_dir_H
-
-        gTp = torch.dot(g, p_dir).item()
-        f0 = float(loss.item())
-
-        alpha = lr
-        if line_search:
-            for _ in range(max_ls):
-                x_try = x + alpha * p_dir
-                self._set_param_vector(x_try)
-                f_try = float(loss_eval().item())
-                if f_try <= f0 + c1 * alpha * gTp:
-                    break
-                alpha *= backtrack
-            else:
-                alpha = 0.0
-
-        if alpha == 0.0 or not np.isfinite(alpha):
-            self._set_param_vector(x)
-            if reset_on_fail:
-                self._init_H(n, g, H_on_cpu)
-            return loss
-
-        s = alpha * p_dir
-        x_new = x + s
-        self._set_param_vector(x_new)
-
-        new_loss = closure()
-        g_new = self._get_grad_vector().detach()
-        y = g_new - g
-
-        ys = torch.dot(y, s)
-        if (not torch.isfinite(ys)) or (ys.abs() <= damping):
-            if reset_on_fail:
-                self._init_H(n, g_new, H_on_cpu)
-            return new_loss
-
-        if self.H.device != g.device:
-            yH = y.detach().cpu()
-            sH = s.detach().cpu()
-            gH2 = g.detach().cpu()
-            HgH2 = Hg.detach()
-        else:
-            yH = y
-            sH = s
-            gH2 = g
-            HgH2 = Hg
-
-        Hy = self.H.matmul(yH)
-        yHy = torch.dot(yH, Hy)
-        if (not torch.isfinite(yHy)) or (yHy.abs() <= damping):
-            if reset_on_fail:
-                self._init_H(n, g_new, H_on_cpu)
-            return new_loss
-
-        sTg = torch.dot(sH, gH2)
-        b_k = (-alpha * sTg) / ys
-        h_k = yHy / ys
-        a_k = h_k * b_k - 1.0
-
-        if (not torch.isfinite(a_k)) or (a_k <= damping) or (not torch.isfinite(b_k)) or (b_k <= damping):
-            tau_k = torch.tensor(1.0, device=self.H.device, dtype=self.H.dtype)
-            phi_k = torch.tensor(1.0, device=self.H.device, dtype=self.H.dtype)
-        else:
-            c_k = torch.sqrt(torch.clamp(a_k / (a_k + 1.0), min=0.0))
-            rho_minus = torch.minimum(torch.tensor(1.0, device=self.H.device, dtype=self.H.dtype), h_k * (1.0 - c_k))
-            rho_safe = torch.clamp(rho_minus, min=damping)
-
-            theta_minus = rho_minus - (1.0 / a_k)
-            theta_plus = 1.0 / rho_safe
-            theta_hat = (1.0 - b_k) / torch.clamp(b_k, min=damping)
-
-            theta_k = torch.maximum(theta_minus, torch.minimum(theta_plus, theta_hat))
-            sigma_k = 1.0 + a_k * theta_k
-            sigma_safe = torch.clamp(sigma_k, min=damping)
-
-            gHg = torch.dot(gH2, HgH2)
-            denom = (alpha * alpha) * torch.clamp(gHg, min=damping)
-            tau1 = torch.minimum(torch.tensor(1.0, device=self.H.device, dtype=self.H.dtype), ys / denom)
-
-            sigma_pow = torch.exp(-torch.log(sigma_safe) / (n - 1.0))
-
-            if theta_k > 0:
-                tau2 = tau1 * torch.minimum(sigma_pow, 1.0 / torch.clamp(theta_k, min=damping))
-            else:
-                tau2 = torch.minimum(tau1 * sigma_pow, sigma_safe)
-
-            tau_k = torch.clamp(tau2, min=tau_min, max=tau_max)
-            phi_k = (1.0 - theta_k) / sigma_safe
-
-        v = torch.sqrt(torch.clamp(yHy, min=damping)) * (sH / ys - Hy / yHy)
-        term = self.H - torch.outer(Hy, Hy) / yHy + phi_k * torch.outer(v, v)
-        H_new = (1.0 / tau_k) * term + torch.outer(sH, sH) / ys
-        self.H = 0.5 * (H_new + H_new.t())
-
-        return new_loss
-
-
-# =============================================================================
-# PINN solver for CFGS: Δ*ψ = 0, with objective transform (including n-th root)
+# PINN solver for the CFGS equation
 # =============================================================================
 class PINN_CFGS_Solver:
     def __init__(
         self,
-        model,
-        lr=1e-3,
-        lambda_pde=1.0,
-        loss_transform="root",   # "root" (default), "sqrt", "log", "identity"
-        root_n=2,                # <-- NEW: n for n-th root (used when loss_transform=="root")
-        loss_eps=1e-12,          # epsilon inside root/log
-        rel_err_eps=1e-12,       # epsilon in denominators for relative errors
-        ssbroyden_H_on_cpu=False,
-    ):
+        model: nn.Module,
+        lr: float = 1e-3,
+        lambda_pde: float = 1.0,
+        loss_transform: str = "identity",  # "identity" | "sqrt" | "log"
+        loss_eps: float = 1e-12,
+        rel_err_eps: float = 1e-12,
+        qn_variant: str = "ssbroyden",  # "bfgs" | "ssbfgs" | "ssbroyden"
+        qn_H_on_cpu: bool = False,
+        b_coeffs: tuple[float, ...] = B_COEFFS,
+    ) -> None:
         self.model = model.to(device)
         self.lambda_pde = float(lambda_pde)
-
         self.loss_transform = str(loss_transform)
         self.loss_eps = float(loss_eps)
         self.rel_err_eps = float(rel_err_eps)
-        self.root_n = int(root_n)
-        if self.root_n < 1:
-            raise ValueError("root_n must be >= 1 for n-th root transform.")
+        self.b_coeffs = tuple(b_coeffs)
 
         self.adam = optim.Adam(self.model.parameters(), lr=lr)
-
-        self.ssbroyden = SSBroydenOptimizer(
+        self.quasi_newton = SSBroydenOptimizer(
             self.model.parameters(),
+            variant=qn_variant,
             lr=1.0,
             line_search=True,
             c1=1e-4,
@@ -321,19 +217,19 @@ class PINN_CFGS_Solver:
             tau_min=1e-6,
             tau_max=1.0,
             reset_on_fail=True,
-            H_on_cpu=ssbroyden_H_on_cpu,
+            H_on_cpu=qn_H_on_cpu,
         )
 
         # Logs
-        self.obj_train = []
-        self.obj_val = []
-        self.J_train = []
-        self.J_val = []
-        self.pde_l2 = []
-        self.sol_l2 = []
-        self.sol_rel_l2 = []
+        self.obj_train: list[float] = []
+        self.obj_val: list[float] = []
+        self.J_train: list[float] = []
+        self.J_val: list[float] = []
+        self.pde_l2: list[float] = []
+        self.sol_l2: list[float] = []
+        self.sol_rel_l2: list[float] = []
 
-        self.best_state = None
+        self.best_state: dict | None = None
         self.best_val_ma = float("inf")
 
     # ---- transform J -> objective ----
@@ -343,162 +239,148 @@ class PINN_CFGS_Solver:
             return J_raw
         if self.loss_transform == "sqrt":
             return torch.sqrt(J_raw + eps)
-        if self.loss_transform == "root":
-            inv_n = 1.0 / float(self.root_n)
-            return torch.pow(J_raw + eps, inv_n)
         if self.loss_transform == "log":
             return torch.log(J_raw + eps)
         raise ValueError(f"Unknown loss_transform={self.loss_transform!r}")
 
-    # ---- hard Dirichlet BC on box boundary ----
-    def _psi_hat(self, RZ: torch.Tensor) -> torch.Tensor:
-        R = RZ[:, 0:1]
-        Z = RZ[:, 1:2]
-        g = (R - Rmin) * (Rmax - R) * (Z - Zmin) * (Zmax - Z)
-        return psi_exact(RZ) + g * self.model(RZ)
+    # ---- hard Dirichlet BC on the (q, mu) rectangle ----
+    def _P_hat(self, qmu: torch.Tensor) -> torch.Tensor:
+        return f_b(qmu, self.b_coeffs) + h_b(qmu) * self.model(qmu)
 
-    # ---- Grad–Shafranov operator Δ*ψ ----
-    def _delta_star(self, RZ: torch.Tensor, create_graph_second: bool) -> torch.Tensor:
-        RZ = RZ.to(device)
-        if not RZ.requires_grad:
-            RZ = RZ.requires_grad_(True)
+    # ---- Grad-Shafranov operator Delta_GS P = q^4 P_qq + 2 q^3 P_q + q^2 (1-mu^2) P_mumu ----
+    def _delta_gs(self, qmu: torch.Tensor, create_graph_second: bool) -> torch.Tensor:
+        qmu = qmu.to(device)
+        if not qmu.requires_grad:
+            qmu = qmu.requires_grad_(True)
 
-        psi = self._psi_hat(RZ)
+        P = self._P_hat(qmu)
 
         grads = torch.autograd.grad(
-            psi, RZ, grad_outputs=torch.ones_like(psi), create_graph=True
+            P, qmu, grad_outputs=torch.ones_like(P), create_graph=True
         )[0]
-        psi_R = grads[:, 0:1]
-        psi_Z = grads[:, 1:2]
+        P_q = grads[:, 0:1]
+        P_mu = grads[:, 1:2]
 
-        psi_RR = torch.autograd.grad(
-            psi_R,
-            RZ,
-            grad_outputs=torch.ones_like(psi_R),
+        P_qq = torch.autograd.grad(
+            P_q,
+            qmu,
+            grad_outputs=torch.ones_like(P_q),
             create_graph=create_graph_second,
             retain_graph=True,
         )[0][:, 0:1]
 
-        psi_ZZ = torch.autograd.grad(
-            psi_Z,
-            RZ,
-            grad_outputs=torch.ones_like(psi_Z),
+        P_mumu = torch.autograd.grad(
+            P_mu,
+            qmu,
+            grad_outputs=torch.ones_like(P_mu),
             create_graph=create_graph_second,
         )[0][:, 1:2]
 
-        R = RZ[:, 0:1]
-        R_safe = torch.clamp(R, min=1e-6)
+        q = qmu[:, 0:1]
+        mu = qmu[:, 1:2]
+        return q**4 * P_qq + 2.0 * q**3 * P_q + q**2 * (1.0 - mu**2) * P_mumu
 
-        return psi_RR - psi_R / R_safe + psi_ZZ
-
-    # ---- compute loss: returns (objective, raw J) ----
-    def compute_loss(self, RZ_interior: torch.Tensor, create_graph_second: bool):
-        RZ = RZ_interior.detach().clone().requires_grad_(True)
-        res = self._delta_star(RZ, create_graph_second=create_graph_second)
-
-        area = (Rmax - Rmin) * (Zmax - Zmin)
-        J_raw = self.lambda_pde * (torch.mean(res**2) * area)  # >= 0
+    # ---- loss (objective + raw MSE residual) ----
+    def compute_loss(self, qmu_interior: torch.Tensor, create_graph_second: bool):
+        qmu = qmu_interior.detach().clone().requires_grad_(True)
+        res = self._delta_gs(qmu, create_graph_second=create_graph_second)
+        area = (q_max - q_min) * (mu_max - mu_min)
+        J_raw = self.lambda_pde * (torch.mean(res**2) * area)
         J_obj = self._transform_objective(J_raw)
         return J_obj, J_raw.detach()
 
-    # ---- diagnostics on a grid (CPU sync) ----
-    def compute_pde_l2(self, n=60):
-        Rs = np.linspace(Rmin, Rmax, n)
-        Zs = np.linspace(Zmin, Zmax, n)
-        RR, ZZ = np.meshgrid(Rs, Zs, indexing="xy")
-        RZ = np.stack([RR.ravel(), ZZ.ravel()], axis=1).astype(np.float32)
-        RZt = torch.from_numpy(RZ).to(device)
+    # ---- diagnostics on a uniform (q, mu) grid ----
+    def _grid(self, n: int):
+        qs = np.linspace(q_min, q_max, n)
+        mus = np.linspace(mu_min, mu_max, n)
+        QQ, MM = np.meshgrid(qs, mus, indexing="xy")
+        QM = np.stack([QQ.ravel(), MM.ravel()], axis=1).astype(np.float32)
+        return qs, mus, QQ, MM, QM
 
-        res = self._delta_star(RZt, create_graph_second=False).detach().cpu().numpy().reshape(n, n)
-        intZ = np.trapz(res**2, Zs, axis=0)
-        integral = np.trapz(intZ, Rs, axis=0)
-        return float(np.sqrt(integral))
+    def compute_pde_l2(self, n: int = 60) -> float:
+        qs, mus, _, _, QM = self._grid(n)
+        QMt = torch.from_numpy(QM).to(device)
+        res = (
+            self._delta_gs(QMt, create_graph_second=False)
+            .detach()
+            .cpu()
+            .numpy()
+            .reshape(n, n)
+        )
+        intMu = np.trapz(res**2, mus, axis=0)
+        return float(np.sqrt(np.trapz(intMu, qs, axis=0)))
 
-    def compute_sol_l2(self, n=60):
-        Rs = np.linspace(Rmin, Rmax, n)
-        Zs = np.linspace(Zmin, Zmax, n)
-        RR, ZZ = np.meshgrid(Rs, Zs, indexing="xy")
-        RZ = np.stack([RR.ravel(), ZZ.ravel()], axis=1).astype(np.float32)
-
-        u_true = psi_exact(RZ).reshape(n, n)
-
-        RZt = torch.from_numpy(RZ).to(device)
+    def compute_sol_l2(self, n: int = 60) -> float:
+        qs, mus, _, _, QM = self._grid(n)
+        QMt = torch.from_numpy(QM).to(device)
+        u_true = P_exact(QMt).detach().cpu().numpy().reshape(n, n)
         with torch.no_grad():
-            u_pred = self._psi_hat(RZt).cpu().numpy().reshape(n, n)
-
+            u_pred = self._P_hat(QMt).cpu().numpy().reshape(n, n)
         diff = u_pred - u_true
-        intZ = np.trapz(diff**2, Zs, axis=0)
-        integral = np.trapz(intZ, Rs, axis=0)
-        return float(np.sqrt(integral))
+        intMu = np.trapz(diff**2, mus, axis=0)
+        return float(np.sqrt(np.trapz(intMu, qs, axis=0)))
 
-    def compute_sol_rel_l2(self, n=60):
-        Rs = np.linspace(Rmin, Rmax, n)
-        Zs = np.linspace(Zmin, Zmax, n)
-        RR, ZZ = np.meshgrid(Rs, Zs, indexing="xy")
-        RZ = np.stack([RR.ravel(), ZZ.ravel()], axis=1).astype(np.float32)
-
-        u_true = psi_exact(RZ).reshape(n, n)
-
-        RZt = torch.from_numpy(RZ).to(device)
+    def compute_sol_rel_l2(self, n: int = 60) -> float:
+        qs, mus, _, _, QM = self._grid(n)
+        QMt = torch.from_numpy(QM).to(device)
+        u_true = P_exact(QMt).detach().cpu().numpy().reshape(n, n)
         with torch.no_grad():
-            u_pred = self._psi_hat(RZt).cpu().numpy().reshape(n, n)
-
+            u_pred = self._P_hat(QMt).cpu().numpy().reshape(n, n)
         diff = u_pred - u_true
-        intZ_num = np.trapz(diff**2, Zs, axis=0)
-        num = np.trapz(intZ_num, Rs, axis=0)
-
-        intZ_den = np.trapz(u_true**2, Zs, axis=0)
-        den = np.trapz(intZ_den, Rs, axis=0)
-
+        num = np.trapz(np.trapz(diff**2, mus, axis=0), qs, axis=0)
+        den = np.trapz(np.trapz(u_true**2, mus, axis=0), qs, axis=0)
         return float(np.sqrt(num) / (np.sqrt(den) + self.rel_err_eps))
 
+    # ---- training loop ----
     def train(
         self,
-        n_epochs=20000,
-        n_collocation=4000,
-        train_split=0.7,
-        resample_every=500,
-        adam_epochs=2000,
-        verbose_freq=200,
-        diag_grid_n=60,
-        patience=500,
-        min_delta=1e-8,
-        moving_avg_window=20,
-        scheduler_patience=300,
-        scheduler_threshold=1e-4,
-        scheduler_gamma=0.9,
-        scheduler_min_lr=1e-6,
-    ):
-        print("\nTraining CFGS PINN: Δ*ψ = 0")
-        print(f"Domain: R∈[{Rmin},{Rmax}], Z∈[{Zmin},{Zmax}]")
-        if self.loss_transform == "root":
-            print(f"Objective transform: root (n={self.root_n})  (eps={self.loss_eps:g})")
-        else:
-            print(f"Objective transform: {self.loss_transform}  (eps={self.loss_eps:g})")
-        print(f"Optimizers: Adam ({adam_epochs} epochs) then SSBroyden")
+        n_epochs: int = 5000,
+        n_collocation: int = 1000,
+        train_split: float = 0.8,
+        resample_every: int = 500,
+        adam_epochs: int = 2000,
+        verbose_freq: int = 200,
+        diag_grid_n: int = 60,
+        patience: int = 2000,
+        min_delta: float = 1e-10,
+        moving_avg_window: int = 20,
+        scheduler_patience: int = 300,
+        scheduler_threshold: float = 1e-4,
+        scheduler_gamma: float = 0.9,
+        scheduler_min_lr: float = 1e-6,
+    ) -> None:
+        print("\nTraining CFGS PINN: Delta_GS P = 0  (Urban et al. 2025, sec. 4.1)")
+        print(f"  Domain:          q in [{q_min}, {q_max}], mu in [{mu_min}, {mu_max}]")
+        print(f"  Surface coeffs:  b = {self.b_coeffs}")
+        print(f"  Loss transform:  {self.loss_transform}  (eps={self.loss_eps:g})")
+        print(
+            f"  Optimizers:      Adam ({adam_epochs} iters)"
+            f" then {self.quasi_newton.param_groups[0]['variant'].upper()}"
+            f" ({n_epochs - adam_epochs} iters)"
+        )
         print("-" * 80)
 
         if not (0.0 < train_split < 1.0):
-            raise ValueError("train_split must be in (0,1).")
+            raise ValueError("train_split must be in (0, 1).")
         if n_collocation < 2:
             raise ValueError("n_collocation must be >= 2.")
         if resample_every < 1:
             raise ValueError("resample_every must be >= 1.")
         if adam_epochs < 0 or adam_epochs >= n_epochs:
-            raise ValueError("adam_epochs must be in [0, n_epochs-1].")
+            raise ValueError("adam_epochs must be in [0, n_epochs - 1].")
 
         n_train = int(n_collocation * train_split)
         n_train = min(max(n_train, 1), n_collocation - 1)
 
         def resample_block():
-            R = torch.empty(n_collocation, 1, device=device).uniform_(Rmin, Rmax)
-            Z = torch.empty(n_collocation, 1, device=device).uniform_(Zmin, Zmax)
-            RZ = torch.cat([R, Z], dim=1)
+            q = torch.empty(n_collocation, 1, device=device).uniform_(q_min, q_max)
+            mu = torch.empty(n_collocation, 1, device=device).uniform_(mu_min, mu_max)
+            qmu = torch.cat([q, mu], dim=1)
             perm = torch.randperm(n_collocation, device=device)
-            RZ = RZ[perm]
-            return RZ[:n_train].detach().clone(), RZ[n_train:].detach().clone()
+            qmu = qmu[perm]
+            return qmu[:n_train].detach().clone(), qmu[n_train:].detach().clone()
 
-        RZ_train, RZ_val = resample_block()
+        qmu_train, qmu_val = resample_block()
 
         def make_plateau(opt):
             try:
@@ -508,7 +390,6 @@ class PINN_CFGS_Solver:
                     factor=scheduler_gamma,
                     patience=scheduler_patience,
                     threshold=scheduler_threshold,
-                    verbose=True,
                     min_lr=scheduler_min_lr,
                 )
             except TypeError:
@@ -518,15 +399,14 @@ class PINN_CFGS_Solver:
                     factor=scheduler_gamma,
                     patience=scheduler_patience,
                     threshold=scheduler_threshold,
-                    min_lr=scheduler_min_lr,
                 )
 
         sch_adam = make_plateau(self.adam)
-        sch_ss = make_plateau(self.ssbroyden)
+        sch_qn = make_plateau(self.quasi_newton)
 
         self.best_state = None
         self.best_val_ma = float("inf")
-        ma_buf = []
+        ma_buf: list[float] = []
         epochs_no_improve = 0
 
         last_pde_l2 = np.nan
@@ -535,43 +415,48 @@ class PINN_CFGS_Solver:
 
         for epoch in range(1, n_epochs + 1):
             if epoch != 1 and ((epoch - 1) % resample_every == 0):
-                RZ_train, RZ_val = resample_block()
+                qmu_train, qmu_val = resample_block()
 
             use_adam = epoch <= adam_epochs
-            opt = self.adam if use_adam else self.ssbroyden
-            sch = sch_adam if use_adam else sch_ss
+            opt = self.adam if use_adam else self.quasi_newton
+            sch = sch_adam if use_adam else sch_qn
 
             if use_adam:
                 opt.zero_grad()
-                J_obj, J_raw = self.compute_loss(RZ_train, create_graph_second=True)
+                J_obj, J_raw = self.compute_loss(qmu_train, create_graph_second=True)
                 J_obj.backward()
                 opt.step()
             else:
-                holder = {}
+                holder: dict = {}
 
                 def closure():
                     opt.zero_grad()
-                    J_obj_c, J_raw_c = self.compute_loss(RZ_train, create_graph_second=True)
+                    J_obj_c, J_raw_c = self.compute_loss(
+                        qmu_train, create_graph_second=True
+                    )
                     holder["J_raw"] = J_raw_c
                     J_obj_c.backward()
                     return J_obj_c
 
                 def loss_eval():
-                    J_obj_e, _ = self.compute_loss(RZ_train, create_graph_second=False)
+                    J_obj_e, _ = self.compute_loss(
+                        qmu_train, create_graph_second=False
+                    )
                     return J_obj_e
 
                 J_obj = opt.step(closure, loss_eval)
                 J_raw = holder["J_raw"]
 
             with torch.set_grad_enabled(True):
-                val_obj, val_raw = self.compute_loss(RZ_val, create_graph_second=False)
+                val_obj, val_raw = self.compute_loss(
+                    qmu_val, create_graph_second=False
+                )
 
             self.obj_train.append(float(J_obj.item()))
             self.obj_val.append(float(val_obj.item()))
             self.J_train.append(float(J_raw.item()))
             self.J_val.append(float(val_raw.item()))
 
-            # early stopping on moving average of validation objective
             ma_buf.append(float(val_obj.item()))
             if len(ma_buf) > moving_avg_window:
                 ma_buf.pop(0)
@@ -579,14 +464,16 @@ class PINN_CFGS_Solver:
 
             if val_ma + min_delta < self.best_val_ma:
                 self.best_val_ma = val_ma
-                self.best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+                self.best_state = {
+                    k: v.detach().cpu().clone()
+                    for k, v in self.model.state_dict().items()
+                }
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
 
             sch.step(float(val_obj.item()))
 
-            # diagnostics occasionally
             if epoch == 1 or (epoch % verbose_freq == 0):
                 last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
                 last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
@@ -598,17 +485,22 @@ class PINN_CFGS_Solver:
 
             if epoch == 1 or (epoch % verbose_freq == 0):
                 lr_now = opt.param_groups[0]["lr"]
-                phase = "ADAM" if use_adam else "SSBROYDEN"
+                phase = "ADAM" if use_adam else self.quasi_newton.param_groups[0][
+                    "variant"
+                ].upper()
                 print(
                     f"Epoch {epoch:6d} [{phase}] | "
                     f"obj={self.obj_train[-1]:.3e}, val_obj={self.obj_val[-1]:.3e} | "
                     f"J={self.J_train[-1]:.3e}, val_J={self.J_val[-1]:.3e} | "
-                    f"pdeL2={last_pde_l2:.3e}, solL2={last_sol_l2:.3e}, relSolL2={last_sol_rel_l2:.3e} | "
-                    f"lr={lr_now:.2e}"
+                    f"pdeL2={last_pde_l2:.3e}, solL2={last_sol_l2:.3e}, "
+                    f"relSolL2={last_sol_rel_l2:.3e} | lr={lr_now:.2e}"
                 )
 
             if epochs_no_improve >= patience:
-                print(f"Early stopping at epoch {epoch} (no val-MA improvement for {patience} epochs).")
+                print(
+                    f"Early stopping at epoch {epoch} "
+                    f"(no val-MA improvement for {patience} epochs)."
+                )
                 break
 
         if self.best_state is not None:
@@ -617,35 +509,51 @@ class PINN_CFGS_Solver:
         print("-" * 80)
         print(f"Done. Best val objective moving average: {self.best_val_ma:.6e}")
 
-    def plot_results(self, n=80):
-        Rs = np.linspace(Rmin, Rmax, n)
-        Zs = np.linspace(Zmin, Zmax, n)
-        RR, ZZ = np.meshgrid(Rs, Zs, indexing="xy")
-        RZ = np.stack([RR.ravel(), ZZ.ravel()], axis=1).astype(np.float32)
+    # ---- plotting ----
+    def plot_results(
+        self, n: int = 80, save_path: str | None = None, dpi: int = 150
+    ) -> None:
+        qs, mus, QQ, MM, QM = self._grid(n)
+        QMt = torch.from_numpy(QM).to(device)
 
-        u_true = psi_exact(RZ).reshape(n, n)
-        RZt = torch.from_numpy(RZ).to(device)
+        u_true = P_exact(QMt).detach().cpu().numpy().reshape(n, n)
         with torch.no_grad():
-            u_pred = self._psi_hat(RZt).cpu().numpy().reshape(n, n)
+            u_pred = self._P_hat(QMt).cpu().numpy().reshape(n, n)
         abs_err = np.abs(u_pred - u_true)
         rel_err = abs_err / (np.abs(u_true) + self.rel_err_eps)
 
         fig, ax = plt.subplots(2, 3, figsize=(16, 9))
 
-        im0 = ax[0, 0].imshow(u_true, origin="lower", extent=[Rmin, Rmax, Zmin, Zmax], aspect="auto")
-        ax[0, 0].set_title("ψ_exact(R,Z)")
+        im0 = ax[0, 0].imshow(
+            u_true, origin="lower", extent=[q_min, q_max, mu_min, mu_max], aspect="auto"
+        )
+        ax[0, 0].set_title(r"$P_{\mathrm{exact}}(q, \mu)$")
         plt.colorbar(im0, ax=ax[0, 0], fraction=0.046)
 
-        im1 = ax[0, 1].imshow(u_pred, origin="lower", extent=[Rmin, Rmax, Zmin, Zmax], aspect="auto")
-        ax[0, 1].set_title("ψ_PINN(R,Z)")
+        im1 = ax[0, 1].imshow(
+            u_pred, origin="lower", extent=[q_min, q_max, mu_min, mu_max], aspect="auto"
+        )
+        ax[0, 1].set_title(r"$P_{\mathrm{PINN}}(q, \mu)$")
         plt.colorbar(im1, ax=ax[0, 1], fraction=0.046)
 
-        im2 = ax[0, 2].imshow(abs_err, origin="lower", extent=[Rmin, Rmax, Zmin, Zmax], aspect="auto")
-        ax[0, 2].set_title("|ψ_PINN - ψ_exact| (absolute)")
+        im2 = ax[0, 2].imshow(
+            abs_err,
+            origin="lower",
+            extent=[q_min, q_max, mu_min, mu_max],
+            aspect="auto",
+        )
+        ax[0, 2].set_title(r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|$")
         plt.colorbar(im2, ax=ax[0, 2], fraction=0.046)
 
-        im3 = ax[1, 0].imshow(rel_err, origin="lower", extent=[Rmin, Rmax, Zmin, Zmax], aspect="auto")
-        ax[1, 0].set_title("|ψ_PINN - ψ_exact| / (|ψ_exact| + eps)")
+        im3 = ax[1, 0].imshow(
+            rel_err,
+            origin="lower",
+            extent=[q_min, q_max, mu_min, mu_max],
+            aspect="auto",
+        )
+        ax[1, 0].set_title(
+            r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|/(|P_{\mathrm{exact}}| + \varepsilon)$"
+        )
         plt.colorbar(im3, ax=ax[1, 0], fraction=0.046)
 
         ax[1, 1].semilogy(self.obj_train, label="obj(train)")
@@ -654,49 +562,128 @@ class PINN_CFGS_Solver:
         ax[1, 1].semilogy(self.J_val, "--", label="J(val)")
         ax[1, 1].grid(True, alpha=0.3)
         ax[1, 1].legend()
-        ax[1, 1].set_title("Objective/Loss curves")
+        ax[1, 1].set_title("Objective / loss curves")
         ax[1, 1].set_xlabel("Epoch")
-        ax[1, 1].set_ylabel("Value")
 
-        ax[1, 2].semilogy(self.pde_l2, label="||Δ*ψ||_L2 (abs)")
-        ax[1, 2].semilogy(self.sol_l2, label="||ψ-ψ_exact||_L2 (abs)")
-        ax[1, 2].semilogy(self.sol_rel_l2, label="||ψ-ψ_exact||_L2 / ||ψ_exact||_L2")
+        ax[1, 2].semilogy(self.pde_l2, label=r"$\|\Delta_{GS} P\|_{L^2}$")
+        ax[1, 2].semilogy(self.sol_l2, label=r"$\|P - P_{\mathrm{exact}}\|_{L^2}$")
+        ax[1, 2].semilogy(self.sol_rel_l2, label="relative $L^2$")
         ax[1, 2].grid(True, alpha=0.3)
         ax[1, 2].legend()
-        ax[1, 2].set_title("Absolute and Relative Errors")
+        ax[1, 2].set_title("Errors over epochs")
         ax[1, 2].set_xlabel("Epoch")
-        ax[1, 2].set_ylabel("Value")
 
         for i, j in [(0, 0), (0, 1), (0, 2), (1, 0)]:
-            ax[i, j].set_xlabel("R")
-            ax[i, j].set_ylabel("Z")
+            ax[i, j].set_xlabel("q")
+            ax[i, j].set_ylabel(r"$\mu$")
 
         plt.tight_layout()
-        plt.show()
+        if save_path is not None:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            print(f"Saved figure to: {save_path}")
+        plt.close(fig)
 
-    def save(self, path="../models/pinn_cfgs_ssbroyden.pth"):
+    def save(self, path: str = "../models/pinn_cfgs_ssbroyden.pth") -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(self.model.state_dict(), path)
         print(f"Saved model to: {path}")
 
+    # ---- numerical results ----
+    def save_results(
+        self,
+        run_dir: str,
+        n_eval: int = 80,
+        extra_metadata: dict | None = None,
+    ) -> None:
+        """Dump training curves + final metrics + field snapshots to `run_dir`.
+
+        Writes three files:
+            history.npz    — per-epoch arrays (losses, L2 errors, ...)
+            fields.npz     — final P_exact, P_pred, abs_err on the (q, mu) grid
+            summary.json   — scalar metrics + hyperparameters
+        """
+        os.makedirs(run_dir, exist_ok=True)
+
+        hist_path = os.path.join(run_dir, "history.npz")
+        np.savez(
+            hist_path,
+            obj_train=np.asarray(self.obj_train, dtype=np.float64),
+            obj_val=np.asarray(self.obj_val, dtype=np.float64),
+            J_train=np.asarray(self.J_train, dtype=np.float64),
+            J_val=np.asarray(self.J_val, dtype=np.float64),
+            pde_l2=np.asarray(self.pde_l2, dtype=np.float64),
+            sol_l2=np.asarray(self.sol_l2, dtype=np.float64),
+            sol_rel_l2=np.asarray(self.sol_rel_l2, dtype=np.float64),
+        )
+        print(f"Saved training history to: {hist_path}")
+
+        qs, mus, QQ, MM, QM = self._grid(n_eval)
+        QMt = torch.from_numpy(QM).to(device)
+        u_true = P_exact(QMt).detach().cpu().numpy().reshape(n_eval, n_eval)
+        with torch.no_grad():
+            u_pred = self._P_hat(QMt).cpu().numpy().reshape(n_eval, n_eval)
+        abs_err = np.abs(u_pred - u_true)
+
+        fields_path = os.path.join(run_dir, "fields.npz")
+        np.savez(
+            fields_path,
+            q=qs.astype(np.float64),
+            mu=mus.astype(np.float64),
+            P_exact=u_true.astype(np.float64),
+            P_pred=u_pred.astype(np.float64),
+            abs_err=abs_err.astype(np.float64),
+        )
+        print(f"Saved field snapshots to: {fields_path}")
+
+        summary = {
+            "problem": "CFGS (Urban et al. 2025, sec. 4.1)",
+            "qn_variant": self.quasi_newton.param_groups[0]["variant"],
+            "loss_transform": self.loss_transform,
+            "loss_eps": self.loss_eps,
+            "lambda_pde": self.lambda_pde,
+            "b_coeffs": list(self.b_coeffs),
+            "domain": {
+                "q": [q_min, q_max],
+                "mu": [mu_min, mu_max],
+            },
+            "n_epochs_run": len(self.obj_train),
+            "best_val_objective_ma": float(self.best_val_ma),
+            "final_obj_train": float(self.obj_train[-1]) if self.obj_train else None,
+            "final_obj_val": float(self.obj_val[-1]) if self.obj_val else None,
+            "final_J_train": float(self.J_train[-1]) if self.J_train else None,
+            "final_J_val": float(self.J_val[-1]) if self.J_val else None,
+            "final_pde_l2": float(self.pde_l2[-1]) if self.pde_l2 else None,
+            "final_sol_l2": float(self.sol_l2[-1]) if self.sol_l2 else None,
+            "final_sol_rel_l2": (
+                float(self.sol_rel_l2[-1]) if self.sol_rel_l2 else None
+            ),
+            "max_abs_err": float(np.max(abs_err)),
+            "mean_abs_err": float(np.mean(abs_err)),
+            "device": str(device),
+            "torch_version": torch.__version__,
+        }
+        if extra_metadata is not None:
+            summary.update(extra_metadata)
+
+        summary_path = os.path.join(run_dir, "summary.json")
+        with open(summary_path, "w") as fh:
+            json.dump(summary, fh, indent=2)
+        print(f"Saved summary to: {summary_path}")
+
 
 # =============================================================================
-# MAIN
+# MAIN — Urban et al. (2025), Table 1 CFGS hyperparameters
 # =============================================================================
-def main():
-    # Choose objective transform here:
-    #   "root"     => (J + eps)^(1/n)   with integer n = root_n
-    #   "sqrt"     => (J + eps)^(1/2)
-    #   "log"      => log(J + eps)
-    #   "identity" => J
-    loss_transform = "log"
-    root_n = 4          # <-- set n here (n=2 matches sqrt)
-    loss_eps = 1e-12
+def main() -> None:
+    # --- user knobs reproducing Table 2 of the paper ---
+    qn_variant = "ssbroyden"     # one of: "bfgs", "ssbfgs", "ssbroyden"
+    loss_transform = "identity"  # one of: "identity", "sqrt", "log"
+    qn_H_on_cpu = False          # set True if OOM on GPU
+    # ---------------------------------------------------
 
-    # If SSBroyden OOMs on GPU, set this True (H stored on CPU)
-    ssbroyden_H_on_cpu = False
-
-    model = NeuralNetwork(hidden_layers=(64, 64, 64), activation=nn.Tanh())
+    # Table 1 CFGS: 1 layer, 30 neurons, tanh.
+    model = NeuralNetwork(hidden_layers=(30,), activation=nn.Tanh())
     print("\nNeural Network Architecture:\n")
     print(model, "\n")
 
@@ -705,31 +692,39 @@ def main():
         lr=1e-3,
         lambda_pde=1.0,
         loss_transform=loss_transform,
-        root_n=root_n,
-        loss_eps=loss_eps,
-        rel_err_eps=1e-12,
-        ssbroyden_H_on_cpu=ssbroyden_H_on_cpu,
+        qn_variant=qn_variant,
+        qn_H_on_cpu=qn_H_on_cpu,
+        b_coeffs=B_COEFFS,
     )
 
+    # Table 1 CFGS: 5000 total iterations, 2000 Adam, batch size 1000,
+    # training set refreshed every 500 iterations.
     pinn.train(
-        n_epochs=20000,
-        n_collocation=4000,
-        train_split=0.7,
+        n_epochs=5000,
+        n_collocation=1000,
+        train_split=0.8,
         resample_every=500,
-        adam_epochs=500,
+        adam_epochs=2000,
         verbose_freq=200,
         diag_grid_n=60,
-        patience=500,
-        min_delta=1e-8,
+        patience=5000,       # disable early stop — match paper's fixed budget
+        min_delta=1e-10,
         moving_avg_window=20,
-        scheduler_patience=300,
-        scheduler_threshold=1e-4,
-        scheduler_gamma=0.9,
-        scheduler_min_lr=1e-6,
     )
 
-    pinn.plot_results(n=80)
-    pinn.save("../models/pinn_cfgs_ssbroyden.pth")
+    run_tag = time.strftime("%Y%m%d_%H%M%S")
+    run_name = f"cfgs_{qn_variant}_{loss_transform}_{run_tag}"
+    run_dir = os.path.join("..", "results", run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    pinn.plot_results(n=80, save_path=os.path.join(run_dir, "results.png"))
+    pinn.save(f"../models/pinn_cfgs_{qn_variant}_{loss_transform}.pth")
+    pinn.save_results(
+        run_dir,
+        n_eval=80,
+        extra_metadata={"run_name": run_name, "run_tag": run_tag},
+    )
+    print(f"\nAll run artefacts written to: {os.path.abspath(run_dir)}")
 
 
 if __name__ == "__main__":

@@ -1,642 +1,651 @@
+"""
+Non-linear Poisson (NLP) PINN — replication of section 5, "Non-linear Poisson
+equation", of
+
+    Urbán, Stefanou & Pons, "Unveiling the optimization process of
+    physics informed neural networks: How accurate and competitive can
+    PINNs be?", J. Comp. Phys. 523, 113656 (2025).
+
+Equation (eq. 40 of the paper; Liouville-type):
+
+    ∇^2 phi - e^{phi} = r(x, y),
+
+where r(x, y) is chosen so that
+
+    phi_exact(x, y) = 1 + sin(k * pi * x) * cos(k * pi * y),    k = 4
+
+is the analytic solution on [0, 1] x [0, 1] with Dirichlet BCs
+
+    phi(0, y) = phi(1, y) = 1,
+    phi(x, 0) = 1 + sin(k pi x),
+    phi(x, 1) = 1 + sin(k pi x) cos(k pi).
+
+The source term is therefore
+
+    r(x, y) = ∇^2 phi_exact - e^{phi_exact}
+            = -2 k^2 pi^2 sin(k pi x) cos(k pi y) - e^{1 + sin(k pi x) cos(k pi y)}.
+
+Hard enforcement of the Dirichlet BCs (paper eqs. 45-46):
+
+    phi(x, y)   = f_b(x, y) + h_b(x, y) * N(x, y; theta),
+    f_b(x, y)   = 1 + [1 - y (1 - cos(k pi))] * sin(k pi x),
+    h_b(x, y)   = x y (1 - x) (1 - y).
+
+Training pipeline (paper, Table 4 NLP row):
+    - tanh activations
+    - Layers: 2, Neurons: 30
+    - Adam for 10 000 iterations, then quasi-Newton for 10 000 more (total 20 000)
+    - Batch (collocation) size: 8000; training set refreshed every 500 iters
+    - Loss: MSE of the PDE residual over the interior
+
+The quasi-Newton variant and the loss transform can be toggled in `main()` to
+reproduce the headline combinations reported in the paper.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import matplotlib.pyplot as plt
-import os
+import matplotlib
 
-# -------------------------------------------------------------------------
+matplotlib.use("Agg")  # headless: no display needed on the remote server
+import matplotlib.pyplot as plt  # noqa: E402
+
+_OPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "optimizers")
+if _OPT_DIR not in sys.path:
+    sys.path.insert(0, _OPT_DIR)
+from ssbroyden import SSBroydenOptimizer  # noqa: E402
+
+
+# =============================================================================
 # DEVICE
-# -------------------------------------------------------------------------
+# =============================================================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# -------------------------------------------------------------------------
-# PROBLEM DEFINITION: Poisson in 2D on [ax,bx]x[ay,by]
-# u_xx + u_yy = f(x,y), Dirichlet BC on the boundary
-# Example exact solution: u(x,y) = sin(pi x) sin(pi y)
-# Then f(x,y) = -2 pi^2 sin(pi x) sin(pi y)
-# with u = 0 on the boundary of the unit square.
-# -------------------------------------------------------------------------
-interval_x = [0.0, 1.0]
-interval_y = [0.0, 1.0]
-ax, bx = interval_x
-ay, by = interval_y
+if device.type == "cuda":
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
 
 
-def f(xy):
-    if isinstance(xy, torch.Tensor):
-        x = xy[:, 0:1]
-        y = xy[:, 1:2]
-        return -2.0 * (np.pi**2) * torch.sin(np.pi * x) * torch.sin(np.pi * y)
-    else:
-        x = xy[:, 0]
-        y = xy[:, 1]
-        return -2.0 * (np.pi**2) * np.sin(np.pi * x) * np.sin(np.pi * y)
+# =============================================================================
+# PROBLEM SETUP: NLP on [0, 1] x [0, 1], wavenumber k = 4
+# =============================================================================
+x_min, x_max = 0.0, 1.0
+y_min, y_max = 0.0, 1.0
+
+K_WAVENUMBER = 4  # paper's choice for "a more pronounced oscillatory behavior"
 
 
-def u_exact(xy):
-    if isinstance(xy, torch.Tensor):
-        x = xy[:, 0:1]
-        y = xy[:, 1:2]
-        return torch.sin(np.pi * x) * torch.sin(np.pi * y)
-    else:
-        x = xy[:, 0]
-        y = xy[:, 1]
-        return np.sin(np.pi * x) * np.sin(np.pi * y)
+def phi_exact(xy: torch.Tensor, k: int = K_WAVENUMBER) -> torch.Tensor:
+    x = xy[:, 0:1]
+    y = xy[:, 1:2]
+    return 1.0 + torch.sin(k * np.pi * x) * torch.cos(k * np.pi * y)
 
 
-# -------------------------------------------------------------------------
-# NEURAL NETWORK
-# -------------------------------------------------------------------------
+def r_source(xy: torch.Tensor, k: int = K_WAVENUMBER) -> torch.Tensor:
+    """r(x, y) such that ∇^2 phi_exact - e^{phi_exact} = r."""
+    x = xy[:, 0:1]
+    y = xy[:, 1:2]
+    kpi = k * np.pi
+    s = torch.sin(kpi * x)
+    c = torch.cos(kpi * y)
+    phi = 1.0 + s * c
+    laplacian = -2.0 * kpi**2 * s * c
+    return laplacian - torch.exp(phi)
+
+
+def f_b(xy: torch.Tensor, k: int = K_WAVENUMBER) -> torch.Tensor:
+    """Smooth function matching the Dirichlet data on the square boundary (eq. 45)."""
+    x = xy[:, 0:1]
+    y = xy[:, 1:2]
+    kpi = k * np.pi
+    return 1.0 + (1.0 - y * (1.0 - np.cos(kpi))) * torch.sin(kpi * x)
+
+
+def h_b(xy: torch.Tensor) -> torch.Tensor:
+    """Bubble that vanishes on the boundary (eq. 46)."""
+    x = xy[:, 0:1]
+    y = xy[:, 1:2]
+    return x * y * (1.0 - x) * (1.0 - y)
+
+
+# =============================================================================
+# Neural network phi_theta(x, y)
+# =============================================================================
 class NeuralNetwork(nn.Module):
-    def __init__(self, hidden_layers=[64, 64, 64], activation=nn.Tanh()):
-        super(NeuralNetwork, self).__init__()
-
-        layers = []
-        input_dim = 2
-
-        for hidden_dim in hidden_layers:
-            layers.append(nn.Linear(input_dim, hidden_dim))
+    def __init__(self, hidden_layers=(30, 30), activation=None) -> None:
+        super().__init__()
+        activation = activation if activation is not None else nn.Tanh()
+        layers: list[nn.Module] = []
+        in_dim = 2
+        for h in hidden_layers:
+            layers.append(nn.Linear(in_dim, h))
             layers.append(activation)
-            input_dim = hidden_dim
+            in_dim = h
+        layers.append(nn.Linear(in_dim, 1))
+        self.net = nn.Sequential(*layers)
 
-        layers.append(nn.Linear(input_dim, 1))
-        self.network = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.network(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 
-# -------------------------------------------------------------------------
-# BFGS OPTIMIZER (FROM SCRATCH)
-# -------------------------------------------------------------------------
-class BFGSOptimizer(optim.Optimizer):
+# =============================================================================
+# PINN solver
+# =============================================================================
+class PINN_NLP_Solver:
     def __init__(
         self,
-        params,
-        lr=1.0,
-        line_search=True,
-        c1=1e-4,
-        tau=0.5,
-        max_ls=20,
-        damping=1e-10,
-    ):
-        defaults = dict(
-            lr=lr,
-            line_search=line_search,
-            c1=c1,
-            tau=tau,
-            max_ls=max_ls,
-            damping=damping,
-        )
-        super().__init__(params, defaults)
-        self.H = None
-
-    def _get_param_vector(self):
-        return torch.cat(
-            [p.data.view(-1) for group in self.param_groups for p in group["params"]]
-        )
-
-    def _set_param_vector(self, vec):
-        offset = 0
-        for group in self.param_groups:
-            for p in group["params"]:
-                numel = p.numel()
-                p.data.copy_(vec[offset : offset + numel].view_as(p))
-                offset += numel
-
-    def _get_grad_vector(self):
-        grads = []
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    grads.append(torch.zeros_like(p.data).view(-1))
-                else:
-                    grads.append(p.grad.data.view(-1))
-        return torch.cat(grads)
-
-    def step(self, closure, loss_eval):
-        loss = closure()
-        g = self._get_grad_vector().detach()
-        x = self._get_param_vector().detach()
-
-        n_params = g.numel()
-        if self.H is None or self.H.shape[0] != n_params:
-            self.H = torch.eye(n_params, device=g.device, dtype=g.dtype)
-
-        p_dir = -self.H.matmul(g)
-        group = self.param_groups[0]
-        lr = group["lr"]
-        line_search = group["line_search"]
-        c1 = group["c1"]
-        tau = group["tau"]
-        max_ls = group["max_ls"]
-        damping = group["damping"]
-        alpha = lr
-
-        if line_search:
-            gTp = torch.dot(g, p_dir).item()
-            f0 = loss.item()
-            for _ in range(max_ls):
-                new_x = x + alpha * p_dir
-                self._set_param_vector(new_x)
-                f_new = loss_eval().item()
-                if f_new <= f0 + c1 * alpha * gTp:
-                    break
-                alpha *= tau
-            else:
-                alpha = 0.0
-
-        s = alpha * p_dir
-        new_x = x + s
-        self._set_param_vector(new_x)
-
-        new_loss = closure()
-        g_new = self._get_grad_vector().detach()
-        y = g_new - g
-        ys = torch.dot(y, s)
-
-        if ys > damping:
-            rho = 1.0 / ys
-            I = torch.eye(n_params, device=g.device, dtype=g.dtype)
-            syT = torch.outer(s, y)
-            ysT = torch.outer(y, s)
-            self.H = (I - rho * syT) @ self.H @ (I - rho * ysT) + rho * torch.outer(
-                s, s
-            )
-        else:
-            self.H = torch.eye(n_params, device=g.device, dtype=g.dtype)
-
-        return new_loss
-
-
-# -------------------------------------------------------------------------
-# PINN FOR 2D BVP: ENFORCE u_xx + u_yy ~ f
-# -------------------------------------------------------------------------
-class PINN_BVP2D_Solver:
-    def __init__(self, model, lr=1e-3, lambda_pde=1.0):
-        """
-        Parameters
-        ----------
-        model : nn.Module
-            Neural network u_theta(x,y).
-        lr : float
-            Learning rate.
-        lambda_pde : float
-            Weight of PDE loss in the total loss.
-        """
+        model: nn.Module,
+        lr: float = 1e-3,
+        lambda_pde: float = 1.0,
+        k: int = K_WAVENUMBER,
+        loss_transform: str = "identity",
+        loss_eps: float = 1e-12,
+        rel_err_eps: float = 1e-12,
+        qn_variant: str = "ssbroyden",
+        qn_H_on_cpu: bool = False,
+    ) -> None:
         self.model = model.to(device)
-        self.adam_optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        self.bfgs_optimizer = BFGSOptimizer(self.model.parameters(), lr=lr)
-        self.optimizer = self.adam_optimizer
-        self.lambda_pde = lambda_pde
+        self.lambda_pde = float(lambda_pde)
+        self.k = int(k)
+        self.loss_transform = str(loss_transform)
+        self.loss_eps = float(loss_eps)
+        self.rel_err_eps = float(rel_err_eps)
 
-        self.losses = []  # total loss (PDE)
-        self.val_losses = []  # validation loss
-        self.pde_losses = []  # PDE residual loss
-        self.pde_l2_errors = []  # L2 norm of PDE residual
-        self.solution_l2_errors = []  # L2 norm of solution error (u_NN - u_exact)
+        self.adam = optim.Adam(self.model.parameters(), lr=lr)
+        self.quasi_newton = SSBroydenOptimizer(
+            self.model.parameters(),
+            variant=qn_variant,
+            lr=1.0,
+            line_search=True,
+            c1=1e-4,
+            backtrack=0.5,
+            max_ls=20,
+            damping=1e-12,
+            tau_min=1e-6,
+            tau_max=1.0,
+            reset_on_fail=True,
+            H_on_cpu=qn_H_on_cpu,
+        )
 
-        self.best_model_state = None
-        self.best_loss = float("inf")
+        self.obj_train: list[float] = []
+        self.obj_val: list[float] = []
+        self.J_train: list[float] = []
+        self.J_val: list[float] = []
+        self.pde_l2: list[float] = []
+        self.sol_l2: list[float] = []
+        self.sol_rel_l2: list[float] = []
 
-    # ------------------- hard-enforced solution -------------------
-    def _u_hat(self, xy):
-        x = xy[:, 0:1]
-        y = xy[:, 1:2]
-        factor = (x - ax) * (bx - x) * (y - ay) * (by - y)
-        return factor * self.model(xy)
+        self.best_state: dict | None = None
+        self.best_val_ma = float("inf")
 
-    # ------------------- core loss components -------------------
-    def _pde_residual(self, xy_interior):
-        xy_interior = xy_interior.to(device)
-        xy_interior.requires_grad_(True)
+    def _transform_objective(self, J_raw: torch.Tensor) -> torch.Tensor:
+        eps = self.loss_eps
+        if self.loss_transform == "identity":
+            return J_raw
+        if self.loss_transform == "sqrt":
+            return torch.sqrt(J_raw + eps)
+        if self.loss_transform == "log":
+            return torch.log(J_raw + eps)
+        raise ValueError(f"Unknown loss_transform={self.loss_transform!r}")
 
-        u = self._u_hat(xy_interior)
+    def _phi_hat(self, xy: torch.Tensor) -> torch.Tensor:
+        return f_b(xy, self.k) + h_b(xy) * self.model(xy)
+
+    def _residual(self, xy: torch.Tensor, create_graph_second: bool) -> torch.Tensor:
+        xy = xy.to(device)
+        if not xy.requires_grad:
+            xy = xy.requires_grad_(True)
+
+        phi = self._phi_hat(xy)
 
         grads = torch.autograd.grad(
-            u, xy_interior, grad_outputs=torch.ones_like(u), create_graph=True
+            phi, xy, grad_outputs=torch.ones_like(phi), create_graph=True
         )[0]
-        u_x = grads[:, 0:1]
-        u_y = grads[:, 1:2]
+        phi_x = grads[:, 0:1]
+        phi_y = grads[:, 1:2]
 
-        u_xx = torch.autograd.grad(
-            u_x, xy_interior, grad_outputs=torch.ones_like(u_x), create_graph=True
+        phi_xx = torch.autograd.grad(
+            phi_x,
+            xy,
+            grad_outputs=torch.ones_like(phi_x),
+            create_graph=create_graph_second,
+            retain_graph=True,
         )[0][:, 0:1]
-        u_yy = torch.autograd.grad(
-            u_y, xy_interior, grad_outputs=torch.ones_like(u_y), create_graph=True
+        phi_yy = torch.autograd.grad(
+            phi_y,
+            xy,
+            grad_outputs=torch.ones_like(phi_y),
+            create_graph=create_graph_second,
         )[0][:, 1:2]
 
-        f_vals = f(xy_interior)
-        r = u_xx + u_yy - f_vals
-        return r
+        return (phi_xx + phi_yy) - torch.exp(phi) - r_source(xy, self.k)
 
-    def compute_loss(self, xy_interior=None, n_collocation_points=1000):
-        """Compute total loss = lambda_pde * PDE-loss.
+    def compute_loss(self, xy_interior: torch.Tensor, create_graph_second: bool):
+        xy = xy_interior.detach().clone().requires_grad_(True)
+        res = self._residual(xy, create_graph_second=create_graph_second)
+        area = (x_max - x_min) * (y_max - y_min)
+        J_raw = self.lambda_pde * (torch.mean(res**2) * area)
+        J_obj = self._transform_objective(J_raw)
+        return J_obj, J_raw.detach()
 
-        Notes
-        -----
-        If `xy_interior` is reused across epochs (as in block-resampling), we create a fresh
-        leaf tensor each call via detach().clone().requires_grad_(True). This prevents
-        accumulating gradients on the collocation-point tensor itself.
-        """
+    def _grid(self, n: int):
+        xs = np.linspace(x_min, x_max, n)
+        ys = np.linspace(y_min, y_max, n)
+        XX, YY = np.meshgrid(xs, ys, indexing="xy")
+        XY = np.stack([XX.ravel(), YY.ravel()], axis=1).astype(np.float32)
+        return xs, ys, XX, YY, XY
 
-        if xy_interior is None:
-            x = torch.empty(n_collocation_points, 1, device=device).uniform_(ax, bx)
-            y = torch.empty(n_collocation_points, 1, device=device).uniform_(ay, by)
-            xy_interior = torch.cat([x, y], dim=1)
-        else:
-            xy_interior = xy_interior.to(device)
+    def compute_pde_l2(self, n: int = 60) -> float:
+        xs, ys, _, _, XY = self._grid(n)
+        XYt = torch.from_numpy(XY).to(device)
+        res = (
+            self._residual(XYt, create_graph_second=False)
+            .detach()
+            .cpu()
+            .numpy()
+            .reshape(n, n)
+        )
+        intX = np.trapz(res**2, xs, axis=1)
+        return float(np.sqrt(np.trapz(intX, ys, axis=0)))
 
-        xy_interior = xy_interior.detach().clone().requires_grad_(True)
-
-        r = self._pde_residual(xy_interior)
-        loss_pde = torch.mean(r**2) * (bx - ax) * (by - ay)
-
-        loss_total = self.lambda_pde * loss_pde
-        return loss_total, loss_pde.detach()
-
-    # ------------------- diagnostics -------------------
-    def compute_pde_l2_norm(self, n_points=50):
-        x = np.linspace(ax, bx, n_points)
-        y = np.linspace(ay, by, n_points)
-        X, Y = np.meshgrid(x, y)
-        xy = np.stack([X.ravel(), Y.ravel()], axis=1)
-
-        xy_torch = torch.FloatTensor(xy).to(device)
-        xy_torch.requires_grad_(True)
-
-        u = self._u_hat(xy_torch)
-        grads = torch.autograd.grad(
-            u, xy_torch, grad_outputs=torch.ones_like(u), create_graph=True
-        )[0]
-        u_x = grads[:, 0:1]
-        u_y = grads[:, 1:2]
-        u_xx = torch.autograd.grad(
-            u_x, xy_torch, grad_outputs=torch.ones_like(u_x), create_graph=True
-        )[0][:, 0:1]
-        u_yy = torch.autograd.grad(
-            u_y, xy_torch, grad_outputs=torch.ones_like(u_y), create_graph=True
-        )[0][:, 1:2]
-
-        u_xx_np = u_xx.detach().cpu().numpy().reshape(X.shape)
-        u_yy_np = u_yy.detach().cpu().numpy().reshape(X.shape)
-        f_np = f(xy).reshape(X.shape)
-        residual = u_xx_np + u_yy_np - f_np
-
-        l2_norm = np.sqrt(np.trapz(np.trapz(residual**2, x, axis=1), y, axis=0))
-        return l2_norm
-
-    def compute_solution_l2_norm(self, n_points=50):
-        x = np.linspace(ax, bx, n_points)
-        y = np.linspace(ay, by, n_points)
-        X, Y = np.meshgrid(x, y)
-        xy = np.stack([X.ravel(), Y.ravel()], axis=1)
-
-        try:
-            u_true = u_exact(xy).reshape(X.shape)
-        except Exception:
-            return None
-
-        xy_torch = torch.FloatTensor(xy).to(device)
+    def compute_sol_l2(self, n: int = 60) -> float:
+        xs, ys, _, _, XY = self._grid(n)
+        XYt = torch.from_numpy(XY).to(device)
+        u_true = phi_exact(XYt, self.k).detach().cpu().numpy().reshape(n, n)
         with torch.no_grad():
-            u_pred = self._u_hat(xy_torch).cpu().numpy().reshape(X.shape)
-
+            u_pred = self._phi_hat(XYt).cpu().numpy().reshape(n, n)
         diff = u_pred - u_true
-        l2_norm = np.sqrt(np.trapz(np.trapz(diff**2, x, axis=1), y, axis=0))
-        return l2_norm
+        intX = np.trapz(diff**2, xs, axis=1)
+        return float(np.sqrt(np.trapz(intX, ys, axis=0)))
 
-    # ------------------- training -------------------
+    def compute_sol_rel_l2(self, n: int = 60) -> float:
+        xs, ys, _, _, XY = self._grid(n)
+        XYt = torch.from_numpy(XY).to(device)
+        u_true = phi_exact(XYt, self.k).detach().cpu().numpy().reshape(n, n)
+        with torch.no_grad():
+            u_pred = self._phi_hat(XYt).cpu().numpy().reshape(n, n)
+        diff = u_pred - u_true
+        num = np.trapz(np.trapz(diff**2, xs, axis=1), ys, axis=0)
+        den = np.trapz(np.trapz(u_true**2, xs, axis=1), ys, axis=0)
+        return float(np.sqrt(num) / (np.sqrt(den) + self.rel_err_eps))
+
     def train(
         self,
-        n_epochs=20000,
-        n_collocation_points=2000,
-        verbose_freq=1000,
-        patience=500,
-        min_delta=1e-7,
-        moving_avg_window=20,
-        pde_l2_points=50,
-        train_split=0.7,
-        scheduler_patience=200,
-        scheduler_threshold=1e-4,
-        scheduler_gamma=0.9,
-        scheduler_min_lr=1e-6,
-        resample_every=500,
-        adam_epochs=2000,
-    ):
-        print("\nStarting PINN training for 2D Poisson...")
-        print(f"Domain: [{ax}, {bx}] x [{ay}, {by}]")
-        print(f"lambda_pde = {self.lambda_pde}")
-        print("-" * 60)
-
-        self.best_model_state = None
-        self.best_loss = float("inf")
-        self.losses.clear()
-        self.val_losses.clear()
-        self.pde_losses.clear()
-        self.pde_l2_errors.clear()
-        self.solution_l2_errors.clear()
+        n_epochs: int = 20000,
+        n_collocation: int = 8000,
+        train_split: float = 0.8,
+        resample_every: int = 500,
+        adam_epochs: int = 10000,
+        verbose_freq: int = 500,
+        diag_grid_n: int = 60,
+        patience: int = 20000,
+        min_delta: float = 1e-10,
+        moving_avg_window: int = 20,
+        scheduler_patience: int = 500,
+        scheduler_threshold: float = 1e-4,
+        scheduler_gamma: float = 0.9,
+        scheduler_min_lr: float = 1e-6,
+    ) -> None:
+        print(
+            "\nTraining NLP PINN: ∇^2 phi - e^{phi} = r(x, y)  "
+            "(Urban et al. 2025, sec. 5)"
+        )
+        print(f"  Domain:          x in [{x_min}, {x_max}], y in [{y_min}, {y_max}]")
+        print(f"  Wavenumber k:    {self.k}")
+        print(f"  Loss transform:  {self.loss_transform}")
+        print(
+            f"  Optimizers:      Adam ({adam_epochs} iters)"
+            f" then {self.quasi_newton.param_groups[0]['variant'].upper()}"
+            f" ({n_epochs - adam_epochs} iters)"
+        )
+        print("-" * 80)
 
         if not (0.0 < train_split < 1.0):
-            raise ValueError("train_split must be between 0 and 1 (exclusive).")
-        if n_collocation_points < 2:
-            raise ValueError(
-                "n_collocation_points must be at least 2 to allow a validation split."
-            )
+            raise ValueError("train_split must be in (0, 1).")
+        if n_collocation < 2:
+            raise ValueError("n_collocation must be >= 2.")
         if resample_every < 1:
             raise ValueError("resample_every must be >= 1.")
         if adam_epochs < 0 or adam_epochs >= n_epochs:
-            raise ValueError("adam_epochs must be >= 0 and < n_epochs.")
+            raise ValueError("adam_epochs must be in [0, n_epochs - 1].")
 
-        n_train = int(n_collocation_points * train_split)
-        n_train = min(max(n_train, 1), n_collocation_points - 1)
+        n_train = int(n_collocation * train_split)
+        n_train = min(max(n_train, 1), n_collocation - 1)
 
-        def resample_collocation_block():
-            x = torch.empty(n_collocation_points, 1, device=device).uniform_(ax, bx)
-            y = torch.empty(n_collocation_points, 1, device=device).uniform_(ay, by)
-            xy_all = torch.cat([x, y], dim=1)
-            perm = torch.randperm(n_collocation_points, device=device)
-            xy_all = xy_all[perm]
-            xy_train_block = xy_all[:n_train].detach().clone()
-            xy_val_block = xy_all[n_train:].detach().clone()
-            return xy_train_block, xy_val_block
+        def resample_block():
+            x = torch.empty(n_collocation, 1, device=device).uniform_(x_min, x_max)
+            y = torch.empty(n_collocation, 1, device=device).uniform_(y_min, y_max)
+            xy = torch.cat([x, y], dim=1)
+            perm = torch.randperm(n_collocation, device=device)
+            xy = xy[perm]
+            return xy[:n_train].detach().clone(), xy[n_train:].detach().clone()
 
-        xy_train_block, xy_val_block = resample_collocation_block()
+        xy_train, xy_val = resample_block()
 
-        self.adam_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.adam_optimizer,
-            mode="min",
-            factor=scheduler_gamma,
-            patience=scheduler_patience,
-            threshold=scheduler_threshold,
-            verbose=True,
-            min_lr=scheduler_min_lr,
-        )
-        self.bfgs_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.bfgs_optimizer,
-            mode="min",
-            factor=scheduler_gamma,
-            patience=scheduler_patience,
-            threshold=scheduler_threshold,
-            verbose=True,
-            min_lr=scheduler_min_lr,
-        )
+        def make_plateau(opt):
+            try:
+                return optim.lr_scheduler.ReduceLROnPlateau(
+                    opt,
+                    mode="min",
+                    factor=scheduler_gamma,
+                    patience=scheduler_patience,
+                    threshold=scheduler_threshold,
+                    min_lr=scheduler_min_lr,
+                )
+            except TypeError:
+                return optim.lr_scheduler.ReduceLROnPlateau(
+                    opt,
+                    mode="min",
+                    factor=scheduler_gamma,
+                    patience=scheduler_patience,
+                    threshold=scheduler_threshold,
+                )
 
-        epochs_without_improvement = 0
-        moving_avg_losses = []
-        actual_epochs = 0
+        sch_adam = make_plateau(self.adam)
+        sch_qn = make_plateau(self.quasi_newton)
+
+        self.best_state = None
+        self.best_val_ma = float("inf")
+        ma_buf: list[float] = []
+        epochs_no_improve = 0
+
+        last_pde_l2 = np.nan
+        last_sol_l2 = np.nan
+        last_sol_rel_l2 = np.nan
 
         for epoch in range(1, n_epochs + 1):
             if epoch != 1 and ((epoch - 1) % resample_every == 0):
-                xy_train_block, xy_val_block = resample_collocation_block()
+                xy_train, xy_val = resample_block()
 
-            if epoch <= adam_epochs:
-                self.optimizer = self.adam_optimizer
-                scheduler = self.adam_scheduler
-            else:
-                self.optimizer = self.bfgs_optimizer
-                scheduler = self.bfgs_scheduler
+            use_adam = epoch <= adam_epochs
+            opt = self.adam if use_adam else self.quasi_newton
+            sch = sch_adam if use_adam else sch_qn
 
-            if self.optimizer is self.adam_optimizer:
-                self.optimizer.zero_grad()
-                loss_total, loss_pde = self.compute_loss(
-                    xy_interior=xy_train_block,
-                    n_collocation_points=n_collocation_points,
-                )
-                loss_total.backward()
-                self.optimizer.step()
+            if use_adam:
+                opt.zero_grad()
+                J_obj, J_raw = self.compute_loss(xy_train, create_graph_second=True)
+                J_obj.backward()
+                opt.step()
             else:
-                loss_parts = {}
+                holder: dict = {}
 
                 def closure():
-                    self.optimizer.zero_grad()
-                    loss_total, loss_pde = self.compute_loss(
-                        xy_interior=xy_train_block,
-                        n_collocation_points=n_collocation_points,
+                    opt.zero_grad()
+                    J_obj_c, J_raw_c = self.compute_loss(
+                        xy_train, create_graph_second=True
                     )
-                    loss_parts["pde"] = loss_pde
-                    loss_total.backward()
-                    return loss_total
+                    holder["J_raw"] = J_raw_c
+                    J_obj_c.backward()
+                    return J_obj_c
 
                 def loss_eval():
-                    loss_total, _ = self.compute_loss(
-                        xy_interior=xy_train_block,
-                        n_collocation_points=n_collocation_points,
+                    J_obj_e, _ = self.compute_loss(
+                        xy_train, create_graph_second=False
                     )
-                    return loss_total
+                    return J_obj_e
 
-                loss_total = self.optimizer.step(closure, loss_eval)
-                loss_pde = loss_parts["pde"]
+                J_obj = opt.step(closure, loss_eval)
+                J_raw = holder["J_raw"]
 
             with torch.set_grad_enabled(True):
-                val_loss, _ = self.compute_loss(
-                    xy_interior=xy_val_block,
-                    n_collocation_points=xy_val_block.shape[0],
-                )
+                val_obj, val_raw = self.compute_loss(xy_val, create_graph_second=False)
 
-            loss_value = loss_total.item()
-            self.losses.append(loss_value)
-            self.pde_losses.append(loss_pde.item())
-            self.val_losses.append(val_loss.item())
+            self.obj_train.append(float(J_obj.item()))
+            self.obj_val.append(float(val_obj.item()))
+            self.J_train.append(float(J_raw.item()))
+            self.J_val.append(float(val_raw.item()))
 
-            pde_l2 = self.compute_pde_l2_norm(n_points=pde_l2_points)
-            self.pde_l2_errors.append(pde_l2)
+            ma_buf.append(float(val_obj.item()))
+            if len(ma_buf) > moving_avg_window:
+                ma_buf.pop(0)
+            val_ma = float(np.mean(ma_buf))
 
-            sol_l2 = self.compute_solution_l2_norm(n_points=pde_l2_points)
-            if sol_l2 is not None:
-                self.solution_l2_errors.append(sol_l2)
-            else:
-                self.solution_l2_errors.append(np.nan)
-
-            actual_epochs = epoch
-
-            moving_avg_losses.append(val_loss.item())
-            if len(moving_avg_losses) > moving_avg_window:
-                moving_avg_losses.pop(0)
-            moving_avg = np.mean(moving_avg_losses)
-
-            if moving_avg + min_delta < self.best_loss:
-                self.best_loss = moving_avg
-                self.best_model_state = {
-                    k: v.cpu().clone() for k, v in self.model.state_dict().items()
+            if val_ma + min_delta < self.best_val_ma:
+                self.best_val_ma = val_ma
+                self.best_state = {
+                    k: v.detach().cpu().clone()
+                    for k, v in self.model.state_dict().items()
                 }
-                epochs_without_improvement = 0
+                epochs_no_improve = 0
             else:
-                epochs_without_improvement += 1
+                epochs_no_improve += 1
 
-            scheduler.step(val_loss.item())
+            sch.step(float(val_obj.item()))
 
-            if epoch % verbose_freq == 0:
-                current_lr = self.optimizer.param_groups[0]["lr"]
+            if epoch == 1 or (epoch % verbose_freq == 0):
+                last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
+                last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
+                last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
+
+            self.pde_l2.append(last_pde_l2)
+            self.sol_l2.append(last_sol_l2)
+            self.sol_rel_l2.append(last_sol_rel_l2)
+
+            if epoch == 1 or (epoch % verbose_freq == 0):
+                lr_now = opt.param_groups[0]["lr"]
+                phase = "ADAM" if use_adam else self.quasi_newton.param_groups[0][
+                    "variant"
+                ].upper()
                 print(
-                    f"Epoch {epoch:6d} | "
-                    f"Loss: {loss_value:.4e} | "
-                    f"Val: {val_loss.item():.4e} | "
-                    f"PDE: {loss_pde.item():.4e} | "
-                    f"LR: {current_lr:.2e} | "
-                    f"||Lap(u)-f||_L2: {pde_l2:.4e} "
-                    f"||u_NN-u_exact||_L2: {sol_l2:.4e}"
+                    f"Epoch {epoch:6d} [{phase}] | "
+                    f"obj={self.obj_train[-1]:.3e}, val_obj={self.obj_val[-1]:.3e} | "
+                    f"J={self.J_train[-1]:.3e}, val_J={self.J_val[-1]:.3e} | "
+                    f"pdeL2={last_pde_l2:.3e}, solL2={last_sol_l2:.3e}, "
+                    f"relSolL2={last_sol_rel_l2:.3e} | lr={lr_now:.2e}"
                 )
 
-            if epoch > adam_epochs and epochs_without_improvement >= patience:
-                print(f"\nEarly stopping at epoch {epoch}")
-                print(f"No improvement in moving average loss for {patience} epochs.")
+            if epochs_no_improve >= patience:
+                print(
+                    f"Early stopping at epoch {epoch} "
+                    f"(no val-MA improvement for {patience} epochs)."
+                )
                 break
 
-        if self.best_model_state is not None:
-            self.model.load_state_dict(self.best_model_state)
-            print(f"\nLoaded best model with moving-average loss: {self.best_loss:.6e}")
+        if self.best_state is not None:
+            self.model.load_state_dict(self.best_state)
 
-        print("-" * 60)
-        print(f"Training completed: {actual_epochs} / {n_epochs} epochs.")
+        print("-" * 80)
+        print(f"Done. Best val objective moving average: {self.best_val_ma:.6e}")
 
-    # ------------------- post-processing -------------------
-    def plot_results(self, n_plot_points=60):
-        x = np.linspace(ax, bx, n_plot_points)
-        y = np.linspace(ay, by, n_plot_points)
-        X, Y = np.meshgrid(x, y)
-        xy = np.stack([X.ravel(), Y.ravel()], axis=1)
+    def plot_results(
+        self, n: int = 80, save_path: str | None = None, dpi: int = 150
+    ) -> None:
+        xs, ys, XX, YY, XY = self._grid(n)
+        XYt = torch.from_numpy(XY).to(device)
 
-        xy_torch = torch.FloatTensor(xy).to(device)
+        u_true = phi_exact(XYt, self.k).detach().cpu().numpy().reshape(n, n)
         with torch.no_grad():
-            u_pred = self._u_hat(xy_torch).cpu().numpy().reshape(X.shape)
-
-        try:
-            u_true = u_exact(xy).reshape(X.shape)
-            have_exact = True
-            abs_error = np.abs(u_pred - u_true)
-        except Exception:
-            u_true = None
-            have_exact = False
-            abs_error = None
+            u_pred = self._phi_hat(XYt).cpu().numpy().reshape(n, n)
+        abs_err = np.abs(u_pred - u_true)
 
         fig, axes = plt.subplots(2, 2, figsize=(12, 9))
 
-        ax0 = axes[0, 0]
-        im0 = ax0.contourf(X, Y, u_pred, levels=30, cmap="viridis")
-        fig.colorbar(im0, ax=ax0)
-        ax0.set_title("u_NN(x,y)")
-        ax0.set_xlabel("x")
-        ax0.set_ylabel("y")
+        im0 = axes[0, 0].contourf(XX, YY, u_true, levels=30, cmap="viridis")
+        fig.colorbar(im0, ax=axes[0, 0])
+        axes[0, 0].set_title(r"$\phi_{\mathrm{exact}}(x, y)$")
 
-        ax1 = axes[0, 1]
-        if have_exact:
-            im1 = ax1.contourf(X, Y, u_true, levels=30, cmap="viridis")
-            fig.colorbar(im1, ax=ax1)
-            ax1.set_title("u_exact(x,y)")
-        else:
-            ax1.text(0.5, 0.5, "No exact solution", ha="center", va="center")
-            ax1.set_title("u_exact(x,y)")
-        ax1.set_xlabel("x")
-        ax1.set_ylabel("y")
+        im1 = axes[0, 1].contourf(XX, YY, u_pred, levels=30, cmap="viridis")
+        fig.colorbar(im1, ax=axes[0, 1])
+        axes[0, 1].set_title(r"$\phi_{\mathrm{PINN}}(x, y)$")
 
-        ax2 = axes[1, 0]
-        if self.losses:
-            epochs_arr = np.arange(1, len(self.losses) + 1)
-            ax2.semilogy(epochs_arr, self.losses, "k-", linewidth=1, label="Total")
-            ax2.semilogy(epochs_arr, self.pde_losses, "b--", linewidth=1, label="PDE")
-        if self.val_losses:
-            epochs_val = np.arange(1, len(self.val_losses) + 1)
-            ax2.semilogy(epochs_val, self.val_losses, "r:", linewidth=1, label="Val")
-        ax2.set_title("Training losses (log scale)")
-        ax2.set_xlabel("Epoch")
-        ax2.set_ylabel("Loss")
-        ax2.grid(True, alpha=0.3)
-        ax2.legend()
+        if self.obj_train:
+            epochs_arr = np.arange(1, len(self.obj_train) + 1)
+            axes[1, 0].semilogy(epochs_arr, self.obj_train, label="obj(train)")
+            axes[1, 0].semilogy(epochs_arr, self.obj_val, label="obj(val)")
+            axes[1, 0].semilogy(epochs_arr, self.J_train, "--", label="J(train)")
+            axes[1, 0].semilogy(epochs_arr, self.J_val, "--", label="J(val)")
+            axes[1, 0].set_xlabel("Epoch")
+            axes[1, 0].set_title("Loss curves")
+            axes[1, 0].grid(True, alpha=0.3)
+            axes[1, 0].legend()
 
-        ax3 = axes[1, 1]
-        if have_exact:
-            im3 = ax3.contourf(X, Y, abs_error, levels=30, cmap="magma")
-            fig.colorbar(im3, ax=ax3)
-            ax3.set_title("|u_NN - u_exact|")
-        else:
-            ax3.text(0.5, 0.5, "No exact solution", ha="center", va="center")
-            ax3.set_title("|u_NN - u_exact|")
-        ax3.set_xlabel("x")
-        ax3.set_ylabel("y")
+        im3 = axes[1, 1].contourf(XX, YY, abs_err, levels=30, cmap="magma")
+        fig.colorbar(im3, ax=axes[1, 1])
+        axes[1, 1].set_title(r"$|\phi_{\mathrm{PINN}} - \phi_{\mathrm{exact}}|$")
+
+        for i, j in [(0, 0), (0, 1), (1, 1)]:
+            axes[i, j].set_xlabel("x")
+            axes[i, j].set_ylabel("y")
 
         plt.tight_layout()
-        plt.show()
+        if save_path is not None:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+            print(f"Saved figure to: {save_path}")
+        plt.close(fig)
 
-        if have_exact:
-            print(f"Max |u_NN - u_exact|:  {abs_error.max():.4e}")
-            print(f"Mean |u_NN - u_exact|: {abs_error.mean():.4e}")
-        if self.pde_l2_errors:
-            print(f"Final ||Lap(u) - f||_L2: {self.pde_l2_errors[-1]:.4e}")
-        if self.solution_l2_errors and np.isfinite(self.solution_l2_errors[-1]):
-            print(
-                f"Final ||u_NN - u_exact||_L2: {self.solution_l2_errors[-1]:.4e}"
-            )
+    def save(self, path: str = "../models/pinn_nlp.pth") -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(self.model.state_dict(), path)
+        print(f"Saved model to: {path}")
 
-    # ------------------- utility: approximant, saving, loading -------------------
-    def get_approximant(self):
-        def NN(xy):
-            arr = np.asarray(xy, dtype=float)
-            if arr.ndim == 1:
-                arr = arr.reshape(1, -1)
-            x_tensor = torch.from_numpy(arr).float().to(device)
-            with torch.no_grad():
-                y_tensor = self._u_hat(x_tensor)
-            y_numpy = y_tensor.cpu().numpy().reshape(-1)
-            return y_numpy if arr.ndim > 0 else float(y_numpy.item())
+    # ---- numerical results ----
+    def save_results(
+        self,
+        run_dir: str,
+        n_eval: int = 80,
+        extra_metadata: dict | None = None,
+    ) -> None:
+        """Dump training curves + final metrics + field snapshots to `run_dir`.
 
-        return NN
+        Writes three files:
+            history.npz    — per-epoch arrays (losses, L2 errors, ...)
+            fields.npz     — final phi_exact, phi_pred, abs_err on the (x, y) grid
+            summary.json   — scalar metrics + hyperparameters
+        """
+        os.makedirs(run_dir, exist_ok=True)
 
-    def save_model(self, filepath="../models/pinn_bvp2d_model.pth"):
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        torch.save(self.model.state_dict(), filepath)
-        print(f"Model saved to {filepath}")
+        hist_path = os.path.join(run_dir, "history.npz")
+        np.savez(
+            hist_path,
+            obj_train=np.asarray(self.obj_train, dtype=np.float64),
+            obj_val=np.asarray(self.obj_val, dtype=np.float64),
+            J_train=np.asarray(self.J_train, dtype=np.float64),
+            J_val=np.asarray(self.J_val, dtype=np.float64),
+            pde_l2=np.asarray(self.pde_l2, dtype=np.float64),
+            sol_l2=np.asarray(self.sol_l2, dtype=np.float64),
+            sol_rel_l2=np.asarray(self.sol_rel_l2, dtype=np.float64),
+        )
+        print(f"Saved training history to: {hist_path}")
 
-    def load_model(self, filepath="../models/pinn_bvp2d_model.pth"):
-        state_dict = torch.load(filepath, map_location=device)
-        self.model.load_state_dict(state_dict)
-        self.model.to(device)
-        print(f"Model loaded from {filepath}")
+        xs, ys, XX, YY, XY = self._grid(n_eval)
+        XYt = torch.from_numpy(XY).to(device)
+        u_true = phi_exact(XYt, self.k).detach().cpu().numpy().reshape(n_eval, n_eval)
+        with torch.no_grad():
+            u_pred = self._phi_hat(XYt).cpu().numpy().reshape(n_eval, n_eval)
+        abs_err = np.abs(u_pred - u_true)
+
+        fields_path = os.path.join(run_dir, "fields.npz")
+        np.savez(
+            fields_path,
+            x=xs.astype(np.float64),
+            y=ys.astype(np.float64),
+            phi_exact=u_true.astype(np.float64),
+            phi_pred=u_pred.astype(np.float64),
+            abs_err=abs_err.astype(np.float64),
+        )
+        print(f"Saved field snapshots to: {fields_path}")
+
+        summary = {
+            "problem": "NLP (Urban et al. 2025, sec. 5)",
+            "qn_variant": self.quasi_newton.param_groups[0]["variant"],
+            "loss_transform": self.loss_transform,
+            "loss_eps": self.loss_eps,
+            "lambda_pde": self.lambda_pde,
+            "k_wavenumber": self.k,
+            "domain": {
+                "x": [x_min, x_max],
+                "y": [y_min, y_max],
+            },
+            "n_epochs_run": len(self.obj_train),
+            "best_val_objective_ma": float(self.best_val_ma),
+            "final_obj_train": float(self.obj_train[-1]) if self.obj_train else None,
+            "final_obj_val": float(self.obj_val[-1]) if self.obj_val else None,
+            "final_J_train": float(self.J_train[-1]) if self.J_train else None,
+            "final_J_val": float(self.J_val[-1]) if self.J_val else None,
+            "final_pde_l2": float(self.pde_l2[-1]) if self.pde_l2 else None,
+            "final_sol_l2": float(self.sol_l2[-1]) if self.sol_l2 else None,
+            "final_sol_rel_l2": (
+                float(self.sol_rel_l2[-1]) if self.sol_rel_l2 else None
+            ),
+            "max_abs_err": float(np.max(abs_err)),
+            "mean_abs_err": float(np.mean(abs_err)),
+            "device": str(device),
+            "torch_version": torch.__version__,
+        }
+        if extra_metadata is not None:
+            summary.update(extra_metadata)
+
+        summary_path = os.path.join(run_dir, "summary.json")
+        with open(summary_path, "w") as fh:
+            json.dump(summary, fh, indent=2)
+        print(f"Saved summary to: {summary_path}")
 
 
-# -------------------------------------------------------------------------
-# MAIN
-# -------------------------------------------------------------------------
-def main():
-    model = NeuralNetwork(hidden_layers=[64, 64, 64], activation=nn.Tanh())
+# =============================================================================
+# MAIN — Urban et al. (2025), Table 4 NLP row
+# =============================================================================
+def main() -> None:
+    # --- user knobs reproducing the paper's optimizer/loss sweeps ---
+    qn_variant = "ssbroyden"     # "bfgs", "ssbfgs", "ssbroyden"
+    loss_transform = "identity"  # "identity", "sqrt", "log"
+    qn_H_on_cpu = False
+    # ---------------------------------------------------------------
+
+    # Table 4 NLP: 2 layers, 30 neurons, tanh.
+    model = NeuralNetwork(hidden_layers=(30, 30), activation=nn.Tanh())
     print("\nNeural Network Architecture:\n")
     print(model, "\n")
 
-    pinn = PINN_BVP2D_Solver(model, lr=1e-3, lambda_pde=1.0)
-
-    pinn.train(
-        n_epochs=20000,
-        n_collocation_points=4000,
-        verbose_freq=1000,
-        patience=200,
-        min_delta=1e-7,
-        moving_avg_window=20,
-        pde_l2_points=60,
-        train_split=0.7,
-        scheduler_patience=300,
-        scheduler_threshold=1e-4,
-        scheduler_gamma=0.9,
-        scheduler_min_lr=1e-6,
-        resample_every=500,
-        adam_epochs=2000,
+    pinn = PINN_NLP_Solver(
+        model=model,
+        lr=1e-3,
+        lambda_pde=1.0,
+        k=K_WAVENUMBER,
+        loss_transform=loss_transform,
+        qn_variant=qn_variant,
+        qn_H_on_cpu=qn_H_on_cpu,
     )
 
-    pinn.plot_results()
+    # Table 4 NLP: 20 000 total iterations, 10 000 Adam, batch size 8000.
+    pinn.train(
+        n_epochs=20000,
+        n_collocation=8000,
+        train_split=0.8,
+        resample_every=500,
+        adam_epochs=10000,
+        verbose_freq=500,
+        diag_grid_n=60,
+        patience=20000,  # disable early stop — match paper's fixed budget
+        min_delta=1e-10,
+    )
 
-    pinn.save_model("../models/pinn_bvp2d_model.pth")
-    pinn.load_model("../models/pinn_bvp2d_model.pth")
+    run_tag = time.strftime("%Y%m%d_%H%M%S")
+    run_name = f"nlp_{qn_variant}_{loss_transform}_{run_tag}"
+    run_dir = os.path.join("..", "results", run_name)
+    os.makedirs(run_dir, exist_ok=True)
 
-    NN = pinn.get_approximant()
-    test_xy = np.array([[0.2, 0.3], [0.5, 0.5], [0.8, 0.1]])
-    print("\nSample approximant outputs:")
-    print(f"xy: {test_xy}")
-    print(f"NN(xy): {NN(test_xy)}")
-    print(f"u_exact(xy): {u_exact(test_xy)}")
-    print(f"|NN(xy) - u_exact(xy)|: {np.abs(NN(test_xy) - u_exact(test_xy))}")
-
-    return model, pinn
+    pinn.plot_results(n=80, save_path=os.path.join(run_dir, "results.png"))
+    pinn.save(f"../models/pinn_nlp_{qn_variant}_{loss_transform}.pth")
+    pinn.save_results(
+        run_dir,
+        n_eval=80,
+        extra_metadata={"run_name": run_name, "run_tag": run_tag},
+    )
+    print(f"\nAll run artefacts written to: {os.path.abspath(run_dir)}")
 
 
 if __name__ == "__main__":
-    model, pinn = main()
+    main()
