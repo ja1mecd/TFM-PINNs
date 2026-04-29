@@ -1,0 +1,36 @@
+{
+  "problem": "CFGS (Urban et al. 2025, sec. 4.1)",
+  "qn_variant": "ssbroyden",
+  "loss_transform": "identity",
+  "loss_eps": 1e-12,
+  "lambda_pde": 1.0,
+  "b_coeffs": [
+    1.0,
+    1.0
+  ],
+  "domain": {
+    "q": [
+      0.0,
+      1.0
+    ],
+    "mu": [
+      -1.0,
+      1.0
+    ]
+  },
+  "n_epochs_run": 5000,
+  "best_val_objective_ma": 2.8343905139616157e-10,
+  "final_obj_train": 2.7204599684083064e-10,
+  "final_obj_val": 2.742450155857057e-10,
+  "final_J_train": 2.7204599684083064e-10,
+  "final_J_val": 2.742450155857057e-10,
+  "final_pde_l2": 1.742360437207467e-05,
+  "final_sol_l2": 9.720582379171895e-06,
+  "final_sol_rel_l2": 1.2246557617500872e-05,
+  "max_abs_err": 1.971423625946045e-05,
+  "mean_abs_err": 4.2337514969403856e-06,
+  "device": "cuda",
+  "torch_version": "1.13.1+cu117",
+  "run_name": "cfgs_ssbroyden_identity_20260429_203834",
+  "run_tag": "20260429_203834"
+}
