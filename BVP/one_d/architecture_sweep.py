@@ -8,6 +8,8 @@ import torch.nn as nn
 
 from pinn_bvpsolver_l2 import PINN_BVP_Solver, NeuralNetwork
 
+ACTIVATION = nn.Tanh()
+
 
 def evaluate_architecture(num_layers, neurons_per_layer, train_args):
     """Train a model with the given architecture and return its final error metric."""
@@ -15,7 +17,7 @@ def evaluate_architecture(num_layers, neurons_per_layer, train_args):
     np.random.seed(train_args.seed)
     hidden_layers = [neurons_per_layer] * num_layers
 
-    model = NeuralNetwork(hidden_layers=hidden_layers, activation=nn.Tanh())
+    model = NeuralNetwork(hidden_layers=hidden_layers, activation=ACTIVATION)
     pinn = PINN_BVP_Solver(
         model,
         lr=train_args.lr,
@@ -200,7 +202,9 @@ def main():
     layers = args.layers
     neurons = args.neurons
     results = run_grid(layers, neurons, args)
-    plot_heatmap(results, layers, neurons, args.output)
+    activation_name = type(ACTIVATION).__name__
+    output_path = args.output.replace("{activation}", activation_name)
+    plot_heatmap(results, layers, neurons, output_path)
 
 
 if __name__ == "__main__":
