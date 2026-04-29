@@ -20,21 +20,22 @@ print(f"Using device: {device}")
 # -------------------------------------------------------------------------
 # PROBLEM DEFINITION: u''(x) = f(x) on [a,b], u(a)=alpha, u(b)=beta
 # -------------------------------------------------------------------------
-# Example (edit as needed):
-interval = [0.25, 1.0]
+# Polynomial benchmark: u''=2 on [0,1] with homogeneous Dirichlet BCs.
+# Exact solution: u(x) = x(x-1).
+interval = [0.0, 1.0]
 a, b = interval
 
 def f(x):
-    # RHS f(x) (supports torch.Tensor and numpy)
+    # RHS f(x) = 2 (supports torch.Tensor and numpy)
     if isinstance(x, torch.Tensor):
-        return 2.0 + x - x
-    return 2.0 + x - x
+        return 2.0 + 0.0 * x
+    return 2.0 + 0.0 * x
 
 def u_exact(x):
-    # Exact solution (optional; used only for diagnostics if provided)
-    return (x - 0.5) ** 2
+    # Exact solution
+    return x * (x - 1.0)
 
-alpha, beta = u_exact(a), u_exact(b)
+alpha, beta = u_exact(a), u_exact(b)  # both 0 (homogeneous)
 
 # -------------------------------------------------------------------------
 # NEURAL NETWORK
@@ -58,11 +59,16 @@ class NeuralNetwork(nn.Module):
 # PINN FOR BVP: ENFORCE u'' ~ f AND BOUNDARY CONDITIONS
 # -------------------------------------------------------------------------
 class PINN_BVP_Solver:
-    def __init__(self, model, lr=1e-3, lambda_bc=10.0, lambda_pde=1.0):
-        """PINN solver for u''(x)=f(x), with Dirichlet BCs u(a)=alpha, u(b)=beta."""
+    def __init__(self, model, lr=1e-3, lambda_pde=1.0):
+        """PINN solver for u''(x)=f(x), with hard Dirichlet ansatz.
+
+        The boundary conditions u(a)=alpha and u(b)=beta are imposed exactly via
+        the ansatz u_hat(x) = alpha*(b-x)/(b-a) + beta*(x-a)/(b-a) + (x-a)*(b-x)*N(x),
+        so the boundary residual is identically zero by construction and only the
+        interior PDE residual is optimised.
+        """
         self.model = model.to(device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        self.lambda_bc = float(lambda_bc)
         self.lambda_pde = float(lambda_pde)
 
         # Training history
@@ -136,13 +142,19 @@ class PINN_BVP_Solver:
         x_val = torch.tensor(x_all[val_idx].reshape(-1, 1), dtype=torch.float32, device=device)
         return x_train, x_val, train_frac, val_frac
 
+    # ------------------- hard-enforced solution -------------------
+    def _u_hat(self, x):
+        """Hard Dirichlet ansatz: matches alpha at a and beta at b by construction."""
+        base = alpha * (b - x) / (b - a) + beta * (x - a) / (b - a)
+        return base + (x - a) * (b - x) * self.model(x)
+
     # ------------------- PDE residual -------------------
     def _pde_residual(self, x_interior, create_graph=True):
-        """Returns r(x)=u_xx(x)-f(x)."""
+        """Returns r(x)=u_xx(x)-f(x) on the hard-enforced ansatz."""
         x_interior = x_interior.to(device)
         x_interior.requires_grad_(True)
 
-        u = self.model(x_interior)
+        u = self._u_hat(x_interior)
 
         # First derivative u_x (must be create_graph=True to allow u_xx)
         u_x = torch.autograd.grad(
@@ -164,17 +176,14 @@ class PINN_BVP_Solver:
         return u_xx - f_vals
 
     def compute_loss_on_points(self, x_interior, create_graph=True):
-        """Loss computed on a given set of collocation points."""
+        """Loss computed on a given set of collocation points (interior PDE residual only)."""
         r = self._pde_residual(x_interior, create_graph=create_graph)
         loss_pde = torch.mean(r ** 2) * (b - a)
 
-        # Boundary points (fixed)
-        x_bc = torch.tensor([[a], [b]], dtype=torch.float32, device=device)
-        u_bc = self.model(x_bc)
-        target_bc = torch.tensor([[alpha], [beta]], dtype=torch.float32, device=device)
-        loss_bc = torch.mean((u_bc - target_bc) ** 2)
+        # Hard ansatz: boundary residual is identically zero.
+        loss_bc = torch.zeros((), device=device)
 
-        loss_total = self.lambda_pde * loss_pde + self.lambda_bc * loss_bc
+        loss_total = self.lambda_pde * loss_pde
         return loss_total, loss_pde.detach(), loss_bc.detach()
 
     # Backwards-compatible: random collocation sampling (not used for validation splitting)
@@ -201,7 +210,7 @@ class PINN_BVP_Solver:
 
         x_torch = torch.tensor(x_test.reshape(-1, 1), dtype=torch.float32, device=device)
         with torch.no_grad():
-            u_pred = self.model(x_torch).cpu().numpy().flatten()
+            u_pred = self._u_hat(x_torch).cpu().numpy().flatten()
 
         diff = u_pred - u_true
         return float(np.sqrt(np.trapz(diff**2, x_test)))
@@ -240,8 +249,7 @@ class PINN_BVP_Solver:
         )
 
         print("\nStarting PINN training for BVP u''(x)=f(x)...")
-        print(f"Domain: [{a}, {b}], BC: u(a)={alpha}, u(b)={beta}")
-        print(f"lambda_bc = {self.lambda_bc}")
+        print(f"Domain: [{a}, {b}], hard ansatz BC: u(a)={alpha}, u(b)={beta}")
         print(f"lambda_pde = {self.lambda_pde}")
         print(f"Collocation points: total={n_points}, train={len(x_train_base)} ({train_frac_n:.0%}), val={len(x_val_base)} ({val_frac_n:.0%})")
         print(f"Point distribution: {point_distribution}")
@@ -349,11 +357,11 @@ class PINN_BVP_Solver:
 
     # ------------------- post-processing -------------------
     def get_approximant(self):
-        """Returns a callable NN(x) on numpy arrays."""
+        """Returns a callable NN(x) on numpy arrays, evaluating the hard-enforced ansatz."""
         def NN(x_np):
             x_torch = torch.tensor(np.array(x_np).reshape(-1, 1), dtype=torch.float32, device=device)
             with torch.no_grad():
-                y = self.model(x_torch).cpu().numpy().flatten()
+                y = self._u_hat(x_torch).cpu().numpy().flatten()
             return y
         return NN
 
@@ -361,8 +369,8 @@ class PINN_BVP_Solver:
         x_test = np.linspace(a, b, n_plot_points)
         x_torch = torch.tensor(x_test.reshape(-1, 1), dtype=torch.float32, device=device, requires_grad=True)
 
-        # Forward
-        u = self.model(x_torch)
+        # Forward (hard-enforced solution)
+        u = self._u_hat(x_torch)
 
         # Derivatives
         u_x = torch.autograd.grad(
@@ -414,7 +422,7 @@ class PINN_BVP_Solver:
             ax.semilogy(epochs_arr, self.losses, "k-", linewidth=1, label="Train total", zorder=2)
             ax.semilogy(epochs_arr, self.val_losses, "r:", linewidth=2, label="Val total", zorder=4)
             ax.semilogy(epochs_arr, self.pde_losses, "b--", linewidth=1, label="Train PDE", zorder=3)
-            ax.semilogy(epochs_arr, self.bc_losses, "g--", linewidth=1, label="Train BC", zorder=3)
+            # BC loss is identically zero under the hard ansatz; omit from plot.
         ax.set_title("Losses")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss (log scale)")
@@ -449,8 +457,7 @@ def main():
     pinn = PINN_BVP_Solver(
         model=model,
         lr=1e-3,
-        lambda_bc=1e6,
-        lambda_pde=1.0
+        lambda_pde=1.0,
     )
 
     pinn.train(
