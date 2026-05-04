@@ -17,27 +17,31 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # -------------------------------------------------------------------------
-# PROBLEM DEFINITION: u''(x) = f(x) on [a,b], u(a)=alpha, u(b)=beta
+# PROBLEM DEFINITION: -u''(x) = (k pi)^2 sin(k pi x) on [0, 1]
 # -------------------------------------------------------------------------
-# Example: exact solution u(x) = sin(pi x)
-# Then u''(x) = -pi^2 sin(pi x), with u(0)=0, u(1)=0
+# Exact solution u(x) = sin(k pi x), with u(0) = u(1) = 0 (homogeneous Dirichlet).
+# Wavenumber k = 4 matches the 2D NLP benchmark of Urban et al. 2025.
 
-interval = [0.0, 1]
+interval = [0.0, 1.0]
 a, b = interval
+
+K_WAVENUMBER = 4.0  # number of half-oscillations halved; sin(k pi x) has k full half-periods
 
 
 def f(x):
+    # PDE forcing f(x) = u''(x) = -(k pi)^2 sin(k pi x).
     if isinstance(x, torch.Tensor):
-        return -torch.sin(x)
-    else:
-        return -np.sin(x)
+        return -((K_WAVENUMBER * np.pi) ** 2) * torch.sin(K_WAVENUMBER * np.pi * x)
+    return -((K_WAVENUMBER * np.pi) ** 2) * np.sin(K_WAVENUMBER * np.pi * x)
 
 
 def u_exact(x):
-    return np.sin(x)
+    if isinstance(x, torch.Tensor):
+        return torch.sin(K_WAVENUMBER * np.pi * x)
+    return np.sin(K_WAVENUMBER * np.pi * x)
 
 
-alpha, beta = u_exact(a), u_exact(b)  # boundary values u(a), u(b)
+alpha, beta = u_exact(a), u_exact(b)  # both 0 (homogeneous)
 
 
 # -------------------------------------------------------------------------
@@ -92,56 +96,41 @@ class PINN_BVP_Solver:
         self.best_model_state = None
         self.best_loss = float("inf")
 
+    # ------------------- hard-enforced solution -------------------
+    def _u_hat(self, x):
+        """Hard Dirichlet ansatz: matches alpha at a and beta at b by construction."""
+        base = alpha * (b - x) / (b - a) + beta * (x - a) / (b - a)
+        return base + (x - a) * (b - x) * self.model(x)
+
     # ------------------- core loss components -------------------
     def _pde_residual(self, x_interior):
         x_interior = x_interior.to(device)
         x_interior.requires_grad_(True)
 
-        u = self.model(x_interior)
-        # First derivative u_x
+        u = self._u_hat(x_interior)
         u_x = torch.autograd.grad(
             u, x_interior, grad_outputs=torch.ones_like(u), create_graph=True
         )[0]
-
-        # Second derivative u_xx
         u_xx = torch.autograd.grad(
             u_x, x_interior, grad_outputs=torch.ones_like(u_x), create_graph=True
         )[0]
-
-        # Right-hand side f(x)
         f_vals = f(x_interior)
-        r = u_xx - f_vals
-        return r
+        return u_xx - f_vals
 
     def compute_loss(self, x_interior=None, n_collocation_points=100):
-        """Compute total loss = lambda_pde * PDE-loss + lambda_bc * BC-loss.
-
-        Notes
-        -----
-        If `x_interior` is reused across epochs (as in block-resampling), we create a fresh
-        leaf tensor each call via detach().clone().requires_grad_(True). This prevents
-        accumulating gradients on the collocation-point tensor itself.
-        """
-
-        # Interior collocation points
+        """Interior PDE-residual loss (hard ansatz: BC residual is identically zero)."""
         if x_interior is None:
             x_interior = torch.empty(n_collocation_points, 1, device=device).uniform_(a, b)
         else:
             x_interior = x_interior.to(device)
 
-        # IMPORTANT: make a fresh leaf tensor each call (prevents .grad accumulation on reused points)
         x_interior = x_interior.detach().clone().requires_grad_(True)
 
         r = self._pde_residual(x_interior)
-        loss_pde = torch.mean(r**2) * (b - a)  # scale by interval length
+        loss_pde = torch.mean(r**2) * (b - a)
+        loss_bc = torch.zeros((), device=device)
 
-        # Boundary points (fixed)
-        x_bc = torch.tensor([[a], [b]], dtype=torch.float32, device=device)
-        u_bc = self.model(x_bc)
-        target_bc = torch.tensor([[alpha], [beta]], dtype=torch.float32, device=device)
-        loss_bc = torch.mean((u_bc - target_bc) ** 2)
-
-        loss_total = self.lambda_pde * loss_pde + self.lambda_bc * loss_bc
+        loss_total = self.lambda_pde * loss_pde
         return loss_total, loss_pde.detach(), loss_bc.detach()
 
     # ------------------- diagnostics -------------------
@@ -150,7 +139,7 @@ class PINN_BVP_Solver:
         x_torch = torch.FloatTensor(x_test.reshape(-1, 1)).to(device)
         x_torch.requires_grad_(True)
 
-        u = self.model(x_torch)
+        u = self._u_hat(x_torch)
 
         u_x = torch.autograd.grad(
             u, x_torch, grad_outputs=torch.ones_like(u), create_graph=True
@@ -169,16 +158,14 @@ class PINN_BVP_Solver:
     def compute_solution_l2_norm(self, n_points=500):
         x_test = np.linspace(a, b, n_points)
 
-        # Try to evaluate exact solution
         try:
             u_true = u_exact(x_test)
         except Exception:
             return None
 
-        # NN approximation
         x_torch = torch.FloatTensor(x_test.reshape(-1, 1)).to(device)
         with torch.no_grad():
-            u_pred = self.model(x_torch).cpu().numpy().flatten()
+            u_pred = self._u_hat(x_torch).cpu().numpy().flatten()
 
         diff = u_pred - u_true
         l2_norm = np.sqrt(np.trapz(diff**2, x_test))
@@ -356,8 +343,8 @@ class PINN_BVP_Solver:
             requires_grad=True,
         )
 
-        # Forward pass u_NN(x)
-        u = self.model(x_torch)  # shape (N,1)
+        # Forward pass u_NN(x) (hard-enforced ansatz)
+        u = self._u_hat(x_torch)  # shape (N,1)
         u_pred = u.detach().cpu().numpy().flatten()
 
         # Exact solution (if available)
@@ -540,7 +527,7 @@ class PINN_BVP_Solver:
             arr = np.asarray(x, dtype=float)
             x_tensor = torch.from_numpy(arr.reshape(-1, 1)).float().to(device)
             with torch.no_grad():
-                y_tensor = self.model(x_tensor)
+                y_tensor = self._u_hat(x_tensor)
             y_numpy = y_tensor.cpu().numpy().reshape(-1)
             return y_numpy if arr.ndim > 0 else float(y_numpy.item())
 

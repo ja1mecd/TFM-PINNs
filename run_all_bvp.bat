@@ -6,7 +6,8 @@ cd /d "%~dp0"
 
 call :run_one BVP\one_d pinn_bvpsolver_l2.py             || goto :fail
 call :run_one BVP\one_d pinn_bvpsolver_l2_BFGS.py        || goto :fail
-call :run_one BVP\one_d pinn_bvpsolver_l2_val_scheduler.py || goto :fail
+call :run_one BVP\one_d pinn_ssbroyden_1d.py             || goto :fail
+call :run_one BVP\one_d boxcox_sweep_1d.py               || goto :fail
 call :run_one BVP\one_d architecture_sweep.py            || goto :fail
 call :run_one BVP\two_d pinn_bvpsolver2d_BFGS.py         || goto :fail
 call :run_one BVP\two_d pinn_ssbroyden_2d.py             || goto :fail

@@ -17,27 +17,30 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # -------------------------------------------------------------------------
-# PROBLEM DEFINITION: u''(x) = f(x) on [a,b], u(a)=alpha, u(b)=beta
+# PROBLEM DEFINITION: -u''(x) = (k pi)^2 sin(k pi x) on [0, 1]
 # -------------------------------------------------------------------------
-# Example: exact solution u(x) = sin(pi x)
-# Then u''(x) = -pi^2 sin(pi x), with u(0)=0, u(1)=0
+# Exact solution u(x) = sin(k pi x), with u(0) = u(1) = 0 (homogeneous Dirichlet).
+# Wavenumber k = 4 matches the 2D NLP benchmark of Urban et al. 2025.
 
-interval = [0.0, 1]
+interval = [0.0, 1.0]
 a, b = interval
+
+K_WAVENUMBER = 4.0
 
 
 def f(x):
     if isinstance(x, torch.Tensor):
-        return -torch.sin(x)
-    else:
-        return -np.sin(x)
+        return -((K_WAVENUMBER * np.pi) ** 2) * torch.sin(K_WAVENUMBER * np.pi * x)
+    return -((K_WAVENUMBER * np.pi) ** 2) * np.sin(K_WAVENUMBER * np.pi * x)
 
 
 def u_exact(x):
-    return np.sin(x)
+    if isinstance(x, torch.Tensor):
+        return torch.sin(K_WAVENUMBER * np.pi * x)
+    return np.sin(K_WAVENUMBER * np.pi * x)
 
 
-alpha, beta = u_exact(a), u_exact(b)  # boundary values u(a), u(b)
+alpha, beta = u_exact(a), u_exact(b)  # both 0 (homogeneous)
 
 
 # -------------------------------------------------------------------------
