@@ -1,0 +1,103 @@
+{
+  "args": {
+    "wavenumber": 4,
+    "qn_variant": "ssbroyden",
+    "powell_eta": 0.2,
+    "max_ls": 20,
+    "only": null,
+    "epochs": 5000,
+    "adam_epochs": 2000,
+    "n_collocation": 400,
+    "resample_every": 500,
+    "hidden": [
+      64,
+      64,
+      64
+    ],
+    "lr": 0.001,
+    "seed": 42,
+    "results_dir": "..\\results"
+  },
+  "runs": [
+    {
+      "label": "standard",
+      "config": {
+        "powell_damping": false,
+        "powell_eta": 0.2,
+        "max_ls": 20,
+        "reset_on_ls_fail": true,
+        "reset_on_curv_fail": true,
+        "alpha0_mode": "unit"
+      },
+      "best_val_objective_ma": 0.006989400368183851,
+      "final_obj_train": 0.012135623954236507,
+      "final_obj_val": 0.008616337552666664,
+      "final_pde_l2": 0.10340062528848648,
+      "final_sol_l2": 0.0005817036726512015,
+      "final_sol_rel_l2": 0.0008226532372235155,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 2697,
+      "qn_ls_failed": 2697
+    },
+    {
+      "label": "inv_norm_only",
+      "config": {
+        "powell_damping": false,
+        "powell_eta": 0.2,
+        "max_ls": 20,
+        "reset_on_ls_fail": true,
+        "reset_on_curv_fail": true,
+        "alpha0_mode": "inv_norm"
+      },
+      "best_val_objective_ma": 3.1883887459116522e-06,
+      "final_obj_train": 8.218824405048508e-06,
+      "final_obj_val": 3.1883887459116522e-06,
+      "final_pde_l2": 0.0034551022108644247,
+      "final_sol_l2": 3.03005836030934e-05,
+      "final_sol_rel_l2": 4.285149701262604e-05,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 1894,
+      "qn_ls_failed": 1891
+    },
+    {
+      "label": "inv_norm_no_reset",
+      "config": {
+        "powell_damping": false,
+        "powell_eta": 0.2,
+        "max_ls": 20,
+        "reset_on_ls_fail": false,
+        "reset_on_curv_fail": true,
+        "alpha0_mode": "inv_norm"
+      },
+      "best_val_objective_ma": 3.886307240463793e-06,
+      "final_obj_train": 8.235707355197519e-06,
+      "final_obj_val": 3.886307240463793e-06,
+      "final_pde_l2": 0.0040356749668717384,
+      "final_sol_l2": 3.242756793042645e-05,
+      "final_sol_rel_l2": 4.58595071467711e-05,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 1919,
+      "qn_ls_failed": 1916
+    },
+    {
+      "label": "inv_norm_no_reset_powell",
+      "config": {
+        "powell_damping": true,
+        "powell_eta": 0.2,
+        "max_ls": 20,
+        "reset_on_ls_fail": false,
+        "reset_on_curv_fail": true,
+        "alpha0_mode": "inv_norm"
+      },
+      "best_val_objective_ma": 7.913985427876469e-06,
+      "final_obj_train": 2.0478886654018424e-05,
+      "final_obj_val": 7.913985427876469e-06,
+      "final_pde_l2": 0.0056689586490392685,
+      "final_sol_l2": 2.1216977984295227e-05,
+      "final_sol_rel_l2": 3.0005338531438747e-05,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 1902,
+      "qn_ls_failed": 1897
+    }
+  ]
+}
