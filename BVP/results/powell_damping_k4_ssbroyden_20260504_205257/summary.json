@@ -1,0 +1,47 @@
+{
+  "args": {
+    "wavenumber": 4,
+    "qn_variant": "ssbroyden",
+    "powell_eta": 0.2,
+    "epochs": 5000,
+    "adam_epochs": 2000,
+    "n_collocation": 400,
+    "resample_every": 500,
+    "hidden": [
+      64,
+      64,
+      64
+    ],
+    "lr": 0.001,
+    "seed": 42,
+    "results_dir": "..\\results"
+  },
+  "runs": [
+    {
+      "label": "standard",
+      "powell": false,
+      "best_val_objective_ma": 5022.32919921875,
+      "final_obj_train": 23823.388671875,
+      "final_obj_val": 37345.52734375,
+      "final_pde_l2": 396.7495422363281,
+      "final_sol_l2": 0.9202185869216919,
+      "final_sol_rel_l2": 1.3013856282428875,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 2869,
+      "qn_ls_failed": 2869
+    },
+    {
+      "label": "powell",
+      "powell": true,
+      "best_val_objective_ma": 5022.32919921875,
+      "final_obj_train": 23823.388671875,
+      "final_obj_val": 37345.52734375,
+      "final_pde_l2": 396.7495422363281,
+      "final_sol_l2": 0.9202185869216919,
+      "final_sol_rel_l2": 1.3013856282428875,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 2869,
+      "qn_ls_failed": 2869
+    }
+  ]
+}

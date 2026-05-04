@@ -1,0 +1,103 @@
+{
+  "args": {
+    "wavenumber": 4,
+    "qn_variant": "ssbroyden",
+    "powell_eta": 0.2,
+    "max_ls": 20,
+    "only": null,
+    "epochs": 5000,
+    "adam_epochs": 2000,
+    "n_collocation": 400,
+    "resample_every": 500,
+    "hidden": [
+      64,
+      64,
+      64
+    ],
+    "lr": 0.001,
+    "seed": 42,
+    "results_dir": "..\\results"
+  },
+  "runs": [
+    {
+      "label": "standard",
+      "config": {
+        "powell_damping": false,
+        "powell_eta": 0.2,
+        "max_ls": 20,
+        "reset_on_ls_fail": true,
+        "reset_on_curv_fail": true,
+        "alpha0_mode": "unit"
+      },
+      "best_val_objective_ma": 5162.36865234375,
+      "final_obj_train": 6352.47900390625,
+      "final_obj_val": 7707.64697265625,
+      "final_pde_l2": 96.65089416503906,
+      "final_sol_l2": 1.6574987173080444,
+      "final_sol_rel_l2": 2.3440572057465605,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 996,
+      "qn_ls_failed": 996
+    },
+    {
+      "label": "inv_norm_only",
+      "config": {
+        "powell_damping": false,
+        "powell_eta": 0.2,
+        "max_ls": 20,
+        "reset_on_ls_fail": true,
+        "reset_on_curv_fail": true,
+        "alpha0_mode": "inv_norm"
+      },
+      "best_val_objective_ma": 5069.3908203125,
+      "final_obj_train": 6422.92333984375,
+      "final_obj_val": 6961.23974609375,
+      "final_pde_l2": 91.1266860961914,
+      "final_sol_l2": 1.7034320831298828,
+      "final_sol_rel_l2": 2.4090167957688933,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 0,
+      "qn_ls_failed": 0
+    },
+    {
+      "label": "inv_norm_no_reset",
+      "config": {
+        "powell_damping": false,
+        "powell_eta": 0.2,
+        "max_ls": 20,
+        "reset_on_ls_fail": false,
+        "reset_on_curv_fail": true,
+        "alpha0_mode": "inv_norm"
+      },
+      "best_val_objective_ma": 5069.3908203125,
+      "final_obj_train": 6422.92333984375,
+      "final_obj_val": 6961.23974609375,
+      "final_pde_l2": 91.1266860961914,
+      "final_sol_l2": 1.7034320831298828,
+      "final_sol_rel_l2": 2.4090167957688933,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 0,
+      "qn_ls_failed": 0
+    },
+    {
+      "label": "inv_norm_no_reset_powell",
+      "config": {
+        "powell_damping": true,
+        "powell_eta": 0.2,
+        "max_ls": 20,
+        "reset_on_ls_fail": false,
+        "reset_on_curv_fail": true,
+        "alpha0_mode": "inv_norm"
+      },
+      "best_val_objective_ma": 5069.3908203125,
+      "final_obj_train": 6422.92333984375,
+      "final_obj_val": 6961.23974609375,
+      "final_pde_l2": 91.1266860961914,
+      "final_sol_l2": 1.7034320831298828,
+      "final_sol_rel_l2": 2.4090167957688933,
+      "qn_iters_recorded": 3000,
+      "qn_skipped_updates": 0,
+      "qn_ls_failed": 0
+    }
+  ]
+}
