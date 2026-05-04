@@ -1,0 +1,48 @@
+{
+  "problem": "1D BVP -u'' = (k pi)^2 sin(k pi x) on [0,1] (Dirichlet, hard ansatz)",
+  "wavenumber_k": 4.0,
+  "qn_variant": "ssbroyden",
+  "loss_transform": "identity",
+  "loss_lambda": 0.5,
+  "loss_eps": 1e-12,
+  "lambda_pde": 1.0,
+  "domain": [
+    0.0,
+    1.0
+  ],
+  "n_epochs_run": 5000,
+  "best_val_objective_ma": 5022.32919921875,
+  "final_obj_train": 23823.388671875,
+  "final_obj_val": 37345.52734375,
+  "final_J_train": 23823.388671875,
+  "final_J_val": 37345.52734375,
+  "final_pde_l2": 396.7495422363281,
+  "final_sol_l2": 0.9202185869216919,
+  "final_sol_rel_l2": 1.3013856282428875,
+  "max_abs_err": 3.2637734413146973,
+  "mean_abs_err": 1.0641766786575317,
+  "device": "cuda",
+  "torch_version": "1.13.1+cu117",
+  "run_name": "bvp1d_k4_ssbroyden_identity_20260504_182035",
+  "run_tag": "20260504_182035",
+  "args": {
+    "wavenumber": 4,
+    "qn_variant": "ssbroyden",
+    "loss_transform": "identity",
+    "loss_lambda": 0.5,
+    "loss_eps": 1e-12,
+    "epochs": 5000,
+    "adam_epochs": 2000,
+    "n_collocation": 400,
+    "resample_every": 500,
+    "hidden": [
+      64,
+      64,
+      64
+    ],
+    "lr": 0.001,
+    "seed": 42,
+    "results_dir": "..\\results",
+    "run_tag_prefix": "bvp1d"
+  }
+}

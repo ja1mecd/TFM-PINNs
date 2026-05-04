@@ -1,0 +1,33 @@
+{
+  "problem": "NLP (Urban et al. 2025, sec. 5)",
+  "qn_variant": "ssbroyden",
+  "loss_transform": "identity",
+  "loss_eps": 1e-12,
+  "lambda_pde": 1.0,
+  "k_wavenumber": 4,
+  "domain": {
+    "x": [
+      0.0,
+      1.0
+    ],
+    "y": [
+      0.0,
+      1.0
+    ]
+  },
+  "n_epochs_run": 20000,
+  "best_val_objective_ma": 0.10879581421613693,
+  "final_obj_train": 0.1182989701628685,
+  "final_obj_val": 0.11509737372398376,
+  "final_J_train": 0.1182989701628685,
+  "final_J_val": 0.11509737372398376,
+  "final_pde_l2": 0.36482134107336733,
+  "final_sol_l2": 0.0002363983986377686,
+  "final_sol_rel_l2": 0.00021144115518486679,
+  "max_abs_err": 0.0007566548883914948,
+  "mean_abs_err": 0.00017752006533555686,
+  "device": "cuda",
+  "torch_version": "1.13.1+cu117",
+  "run_name": "nlp_ssbroyden_identity_20260504_190728",
+  "run_tag": "20260504_190728"
+}
