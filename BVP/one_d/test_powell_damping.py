@@ -31,13 +31,23 @@ Powell damping:
 
 Default ablation configurations
 -------------------------------
-  * standard          - reset_on_ls_fail=True, alpha0=unit (baseline)
-  * no_reset_on_ls    - reset_on_ls_fail=False
-  * alpha_inv_norm    - alpha0=inv_norm
-  * alpha_carry       - alpha0=carry
-  * combined          - no reset on LS fail + inv-norm initial step
+The default sweep is a focused 4-config ladder where each row layers exactly
+one new mechanism on top of the previous, so the rel-L2 deltas attribute
+improvements to specific causes:
 
-Pass ``--include-powell`` to add a sixth ``combined_powell`` config.
+  * standard                 -- alpha0=unit, reset_on_ls=True (baseline)
+  * inv_norm_only            -- + scale-aware initial alpha
+  * inv_norm_no_reset        -- + preserve H across LS failures
+  * inv_norm_no_reset_powell -- + Powell damping of the curvature pair
+
+Note on the H reset bug
+-----------------------
+Earlier versions of this script (and the underlying ``BVP/optimizers/
+ssbroyden.py``) had a latent bug in ``_init_H``: the helper only created
+the buffer on the first call and was a no-op thereafter, so every
+``reset_on_*_fail`` flag was silently inert. This file now fixes that by
+overwriting H with the identity on every call. Numbers from previous runs
+of this script are no longer directly comparable to the new defaults.
 
 Powell damping (kept for completeness)
 --------------------------------------
@@ -53,8 +63,8 @@ is computed without inverting H.
 Usage
 -----
     python test_powell_damping.py --epochs 5000 --adam-epochs 2000
-    python test_powell_damping.py --include-powell --max-ls 50
-    python test_powell_damping.py --only standard combined --epochs 3000
+    python test_powell_damping.py --max-ls 50
+    python test_powell_damping.py --only standard inv_norm_only --epochs 3000
 
 Outputs are written to ``../results/ls_ablation_<timestamp>/``.
 """
@@ -197,9 +207,20 @@ class SSBroydenPowellOptimizer(optim.Optimizer):
 
     @torch.no_grad()
     def _init_H(self, n: int, ref_tensor: torch.Tensor, H_on_cpu: bool) -> None:
-        if self.H is None or self.H.shape[0] != n:
-            dev = torch.device("cpu") if H_on_cpu else ref_tensor.device
+        """(Re)initialise H_k to the identity.
+
+        The original ``BVP/optimizers/ssbroyden.py`` only created the buffer
+        on the first call (``if self.H is None or shape mismatch``) and was
+        a no-op on subsequent calls. That made every ``reset_on_*_fail`` flag
+        inert in practice. Here we always overwrite the buffer to identity,
+        so the flags actually do something.
+        """
+        dev = torch.device("cpu") if H_on_cpu else ref_tensor.device
+        if self.H is None or self.H.shape[0] != n or self.H.device != dev:
             self.H = torch.eye(n, device=dev, dtype=ref_tensor.dtype)
+        else:
+            self.H.zero_()
+            self.H.fill_diagonal_(1.0)
 
     def _record(self, **kwargs: float) -> None:
         for key in self.diag.keys():
@@ -451,7 +472,20 @@ class SSBroydenPowellOptimizer(optim.Optimizer):
 # Ablation configs
 # =============================================================================
 def default_ablation_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """Return the list of named configurations swept by the ablation runner."""
+    """Return the focused 4-config sweep that isolates the three mechanisms.
+
+    Now that ``_init_H`` actually resets the buffer (see fix above), the
+    ``reset_on_ls_fail`` flag has real semantic content. The four configs
+    isolate, in turn:
+
+        standard              -- baseline pathological run
+        inv_norm_only         -- + scale-aware initial alpha (LS init fix)
+        inv_norm_no_reset     -- + preserve H across LS failures
+        inv_norm_no_reset_powell -- + Powell damping of the curvature pair
+
+    Each subsequent config layers exactly one new fix on top of the previous,
+    so the deltas attribute the rel-L2 improvement to a specific mechanism.
+    """
     base = dict(
         powell_damping=False,
         powell_eta=args.powell_eta,
@@ -467,27 +501,21 @@ def default_ablation_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
         d["label"] = label
         return d
 
-    configs = [
+    return [
         cfg("standard"),
-        cfg("no_reset_on_ls", reset_on_ls_fail=False),
-        cfg("alpha_inv_norm", alpha0_mode="inv_norm"),
-        cfg("alpha_carry", alpha0_mode="carry"),
+        cfg("inv_norm_only", alpha0_mode="inv_norm"),
         cfg(
-            "combined",
-            reset_on_ls_fail=False,
+            "inv_norm_no_reset",
             alpha0_mode="inv_norm",
+            reset_on_ls_fail=False,
+        ),
+        cfg(
+            "inv_norm_no_reset_powell",
+            alpha0_mode="inv_norm",
+            reset_on_ls_fail=False,
+            powell_damping=True,
         ),
     ]
-    if args.include_powell:
-        configs.append(
-            cfg(
-                "combined_powell",
-                reset_on_ls_fail=False,
-                alpha0_mode="inv_norm",
-                powell_damping=True,
-            )
-        )
-    return configs
 
 
 # =============================================================================
@@ -689,8 +717,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Powell threshold; standard choice is 0.2.")
     p.add_argument("--max-ls", type=int, default=20,
                    help="Backtracking budget per outer QN step.")
-    p.add_argument("--include-powell", action="store_true",
-                   help="Add a 'combined_powell' config to the sweep.")
     p.add_argument("--only", type=str, nargs="+", default=None,
                    help="Restrict the sweep to these config labels.")
     p.add_argument("--epochs", type=int, default=5000)
