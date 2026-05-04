@@ -900,16 +900,26 @@ class PINN_NLGS_Solver:
         ax[0, 2].set_title(r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|$")
         plt.colorbar(im2, ax=ax[0, 2], fraction=0.046)
 
+        # Clip the colormap at the 99th percentile so isolated spikes
+        # (where |P_exact| ~ 0 inflates the ratio) do not flatten the rest
+        # of the field. The underlying values are unchanged; only the
+        # visual range is bounded.
+        rel_vmax = float(np.percentile(rel_err, 99))
+        if not np.isfinite(rel_vmax) or rel_vmax <= 0.0:
+            rel_vmax = float(np.nanmax(rel_err)) if np.isfinite(np.nanmax(rel_err)) else 1.0
         im3 = ax[1, 0].imshow(
             rel_err,
             origin="lower",
             extent=[q_min, q_max, mu_min, mu_max],
             aspect="auto",
+            vmin=0.0,
+            vmax=rel_vmax,
         )
         ax[1, 0].set_title(
             r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|/(|P_{\mathrm{exact}}| + \varepsilon)$"
+            f"  (clipped at p99 = {rel_vmax:.2e})"
         )
-        plt.colorbar(im3, ax=ax[1, 0], fraction=0.046)
+        plt.colorbar(im3, ax=ax[1, 0], fraction=0.046, extend="max")
 
         ax[1, 1].semilogy(self.obj_train, label="obj(train)")
         ax[1, 1].semilogy(self.obj_val, label="obj(val)")

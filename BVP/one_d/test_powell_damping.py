@@ -206,14 +206,24 @@ class SSBroydenPowellOptimizer(optim.Optimizer):
         return torch.cat(grads)
 
     @torch.no_grad()
-    def _init_H(self, n: int, ref_tensor: torch.Tensor, H_on_cpu: bool) -> None:
-        """(Re)initialise H_k to the identity.
+    def _ensure_H(self, n: int, ref_tensor: torch.Tensor, H_on_cpu: bool) -> None:
+        """Create the H buffer on the first step; no-op once it exists.
 
-        The original ``BVP/optimizers/ssbroyden.py`` only created the buffer
-        on the first call (``if self.H is None or shape mismatch``) and was
-        a no-op on subsequent calls. That made every ``reset_on_*_fail`` flag
-        inert in practice. Here we always overwrite the buffer to identity,
-        so the flags actually do something.
+        Called at the start of every step to preserve curvature information
+        accumulated across previous iterations.
+        """
+        dev = torch.device("cpu") if H_on_cpu else ref_tensor.device
+        if self.H is None or self.H.shape[0] != n or self.H.device != dev:
+            self.H = torch.eye(n, device=dev, dtype=ref_tensor.dtype)
+
+    @torch.no_grad()
+    def _reset_H(self, n: int, ref_tensor: torch.Tensor, H_on_cpu: bool) -> None:
+        """Force H back to the identity. Used by reset_on_*_fail paths.
+
+        The original ``BVP/optimizers/ssbroyden.py`` used the same idempotent
+        ``_init_H`` helper here, which made the reset flags silently inert.
+        This split makes the flags actually do something while keeping the
+        start-of-step path non-destructive.
         """
         dev = torch.device("cpu") if H_on_cpu else ref_tensor.device
         if self.H is None or self.H.shape[0] != n or self.H.device != dev:
@@ -249,7 +259,7 @@ class SSBroydenPowellOptimizer(optim.Optimizer):
         g = self._get_grad_vector().detach()
         x = self._get_param_vector().detach()
         n = g.numel()
-        self._init_H(n, g, H_on_cpu)
+        self._ensure_H(n, g, H_on_cpu)
 
         gH = g.detach().cpu() if self.H.device != g.device else g
         Hg = self.H.matmul(gH)
@@ -287,7 +297,7 @@ class SSBroydenPowellOptimizer(optim.Optimizer):
         if alpha == 0.0 or not np.isfinite(alpha):
             self._set_param_vector(x)
             if reset_on_ls_fail:
-                self._init_H(n, g, H_on_cpu)
+                self._reset_H(n, g, H_on_cpu)
             # Shrink the carry value so we try a smaller step next time.
             if alpha0_mode == "carry":
                 self._last_alpha = max(self._last_alpha * backtrack, 1e-12)
@@ -350,7 +360,7 @@ class SSBroydenPowellOptimizer(optim.Optimizer):
         # Curvature guard on the effective pair.
         if (not torch.isfinite(ys_eff_t)) or (ys_eff_t.abs() <= damping):
             if reset_on_curv_fail:
-                self._init_H(n, g_new, H_on_cpu)
+                self._reset_H(n, g_new, H_on_cpu)
             self._record(
                 alpha=alpha,
                 alpha0=alpha0,
@@ -367,7 +377,7 @@ class SSBroydenPowellOptimizer(optim.Optimizer):
         yHy = torch.dot(y_eff, Hy)
         if (not torch.isfinite(yHy)) or (yHy.abs() <= damping):
             if reset_on_curv_fail:
-                self._init_H(n, g_new, H_on_cpu)
+                self._reset_H(n, g_new, H_on_cpu)
             self._record(
                 alpha=alpha,
                 alpha0=alpha0,
