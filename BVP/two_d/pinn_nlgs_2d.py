@@ -1,59 +1,63 @@
 """
-Current-Free Grad-Shafranov (CFGS) PINN — replication of section 4.1 of
+Non-Linear Grad-Shafranov (NLGS) PINN — replication of section 4.2 of
 
     Urbán, Stefanou & Pons, "Unveiling the optimization process of
     physics informed neural networks: How accurate and competitive can
     PINNs be?", J. Comp. Phys. 523, 113656 (2025).
 
-Equation (eq. 28 of the paper, with T = 0):
+Equation (eq. 28 of the paper, with a non-vanishing toroidal function T(P)):
 
-    Delta_GS P = 0,
+    Delta_GS P + T(P) * T'(P) = 0,
 
 where (eq. 29, in compactified spherical coordinates q = 1/r, mu = cos(theta))
 
     Delta_GS = q^2 ( q^2 d^2/dq^2 + 2 q d/dq ) + q^2 (1 - mu^2) d^2/dmu^2
-             = q^4 P_qq + 2 q^3 P_q + q^2 (1 - mu^2) P_mumu.
+             = q^4 P_qq + 2 q^3 P_q + q^2 (1 - mu^2) P_mumu,
 
-Domain (Table 1): (q, mu) in [0, 1] x [-1, 1].
+and the toroidal function (eq. 36, generalised to negative P) is
 
-Analytic solution (eq. 32):
+    T(P) = s * (|P| - P_c)^sigma     if |P| > P_c,
+           0                          otherwise.
 
-    P_an(q, mu) = (1 - mu^2) * sum_{l=1}^{lmax} q^l * b_l * P'_l(mu),
+Hence T'(P) = s * sigma * (|P| - P_c)^(sigma - 1) * sign(P) above the
+threshold, and T(P) T'(P) is C^1 smooth across |P| = P_c provided sigma >= 2.
 
-where P'_l is the derivative of the Legendre polynomial. This script uses the
-"dipole + quadrupole" case mentioned in section 4.1 (b_1 != 0, b_2 != 0, all
-others zero). The coefficients b_l are free parameters controlling the
-surface field; the paper does not fix specific values, so we choose a simple
-dipole-dominated pair (b_1 = 1, b_2 = 1) as a default.
+Domain (Table 1, NLGS row): (q, mu) in [0, 1] x [-1, 1].
 
-Hard enforcement of Dirichlet BCs (eqs. 30-31):
+Boundary conditions (paper §4.2): a richer surface field with eight
+multipoles, b_l != 0 for 1 <= l <= 8, with the same hard-enforcement ansatz
+as CFGS,
 
     P(q, mu) = f_b(q, mu) + h_b(q, mu) * N(q, mu; theta),
-    f_b     = q * (1 - mu^2) * sum_l b_l * P'_l(mu),
-    h_b     = q * (q - 1) * (1 - mu^2),
+    f_b     = q * (1 - mu^2) * sum_{l=1}^{8} b_l * P'_l(mu),
+    h_b     = q * (q - 1) * (1 - mu^2).
 
-so that P vanishes on the axis (mu = +/- 1) and at infinity (q = 0), and
-equals the prescribed surface data at q = 1.
+The non-linearity precludes a closed-form solution, so the primary validation
+metric is the L^2 norm of the discretised PDE residual on a fine grid (paper
+fig. 4 right panels). The ``compute_pde_l2`` diagnostic returns this metric.
+A reference linear (CFGS) solution P_an built from the same b_l coefficients
+is also tracked as a sanity-check baseline; it is *not* the exact solution of
+the non-linear problem but provides a meaningful regression target during the
+Adam warm-start phase, when the residual is still dominated by the linear
+part.
 
-Training pipeline (paper, Table 1 CFGS):
+Training pipeline (paper, Table 1 NLGS):
     - tanh activations
-    - Layers: 1, Neurons: 30
-    - Adam for 2000 iterations, then quasi-Newton for 3000 more (total 5000)
-    - Batch (collocation) size: 1000; training set refreshed every 500 iters
+    - Layers: 2, Neurons: 30
+    - Adam for 10 000 iterations, then quasi-Newton for 10 000 more (total 20 000)
+    - Batch (collocation) size: 8000; training set refreshed every 500 iters
     - Loss: MSE of the PDE residual over the interior
 
-This script exposes two knobs for the paper's headline sweep:
+This script exposes the same knobs as the CFGS solver:
     --variant       one of {"bfgs", "ssbfgs", "ssbroyden"}
     --loss_transform one of {"identity", "sqrt", "log", "boxcox"}
 
-which together reproduce the combinations in Table 2 of the paper. The
-``boxcox`` option additionally reads ``loss_lambda`` and applies the Box-Cox
-transformation g_lambda(J + eps) = (expm1(lambda * log(J + eps))) / lambda
+plus the Phase A / Phase B lambda schedule introduced for the Box-Cox
+generalisation; see ``loss_lambda_schedule`` in train(). The ``boxcox``
+option applies the Box-Cox transformation
+g_lambda(J + eps) = (expm1(lambda * log(J + eps))) / lambda
 (or log(J + eps) when lambda == 0), evaluated in a numerically stable form
-that avoids catastrophic cancellation for small |lambda|. The legacy
-``sqrt`` and ``log`` branches are kept verbatim for reproducibility of
-historical runs; ``boxcox`` with loss_lambda=0.5 (resp. 0.0) is equivalent
-up to an affine constant.
+that avoids catastrophic cancellation for small |lambda|.
 """
 
 from __future__ import annotations
@@ -96,15 +100,25 @@ if device.type == "cuda":
 
 
 # =============================================================================
-# PROBLEM SETUP: CFGS in compactified spherical (q, mu)
+# PROBLEM SETUP: NLGS in compactified spherical (q, mu)
 # =============================================================================
 q_min, q_max = 0.0, 1.0
 mu_min, mu_max = -1.0, 1.0
 
-# Dipole-quadrupole surface coefficients b_l for l = 1, ..., lmax.
-# Paper: "we focus on a dipole-quadrupole solution (b_1, b_2 != 0, b_{l>2} = 0)".
-# Specific values are a free parameter; we pick a dipole-dominated pair.
-B_COEFFS = (1.0, 1.0)
+# Eight-multipole surface coefficients b_l for l = 1, ..., 8.
+# Paper §4.2: "the boundary condition consists of eight multipoles, so that
+# b_{l<=8} != 0". The specific values are a free parameter that controls the
+# richness of the surface field; we use a slowly decaying tail in l so the
+# dipole still dominates and the higher harmonics add fine structure.
+B_COEFFS = (1.0, 0.6, 0.4, 0.3, 0.2, 0.15, 0.1, 0.08)
+
+# Toroidal-function parameters (eq. 36 of the paper):
+# T(P) = s * (|P| - P_c)^sigma  for |P| > P_c, else 0.
+# We use sigma = 2 so that T(P) T'(P) is C^1 across |P| = P_c, which keeps
+# second-order autodiff of the residual well behaved.
+T_S = 1.0
+T_PC = 0.05
+T_SIGMA = 2.0
 
 
 def legendre_derivatives(mu: torch.Tensor, lmax: int) -> list[torch.Tensor]:
@@ -143,8 +157,15 @@ def _surface_sum(mu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
     return total
 
 
-def P_exact(qmu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
-    """Analytic current-free solution (paper eq. 32)."""
+def P_linear_reference(qmu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
+    """Linear (CFGS, T = 0) reference solution built from the same surface
+    multipoles, paper eq. 32.
+
+    Used as a sanity baseline only: it is the *exact* solution of the linear
+    problem with these b_l coefficients but only an approximation of the
+    non-linear NLGS solution. Useful to monitor early-training behaviour
+    where the residual is still dominated by the linear Delta_GS part.
+    """
     q = qmu[:, 0:1]
     mu = qmu[:, 1:2]
     derivs = legendre_derivatives(mu, lmax=len(b_coeffs))
@@ -152,6 +173,43 @@ def P_exact(qmu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
     for l, (b, dP) in enumerate(zip(b_coeffs, derivs), start=1):
         poly = poly + (q**l) * b * dP
     return (1.0 - mu**2) * poly
+
+
+# Backwards-compatible alias so any pre-existing code path that imports
+# P_exact still resolves; for NLGS this is *not* the exact solution.
+P_exact = P_linear_reference
+
+
+def toroidal_TT_prime(
+    P: torch.Tensor,
+    s: float = T_S,
+    P_c: float = T_PC,
+    sigma: float = T_SIGMA,
+) -> torch.Tensor:
+    """Compute T(P) * T'(P) for the toroidal function of paper eq. 36,
+
+        T(P) = s * (|P| - P_c)^sigma   for |P| > P_c, else 0,
+
+    and its derivative
+
+        T'(P) = s * sigma * (|P| - P_c)^(sigma - 1) * sign(P)
+                  for |P| > P_c, else 0.
+
+    Hence
+
+        T(P) T'(P) = s^2 * sigma * (|P| - P_c)^(2 sigma - 1) * sign(P)
+                       on |P| > P_c, else 0.
+
+    The mask is implemented with a smooth softplus-like clamp so that the
+    function is differentiable through autograd. We use the relu-clamp
+    `torch.clamp(|P| - P_c, min=0)` inside a power, which is C^{2 sigma - 2}
+    smooth at the threshold; for sigma >= 2 this yields C^{>=2} continuity,
+    sufficient for second-order residual autodiff.
+    """
+    abs_P = torch.abs(P)
+    excess = torch.clamp(abs_P - P_c, min=0.0)
+    # T(P) T'(P) = s^2 * sigma * excess^(2*sigma - 1) * sign(P)
+    return (s * s) * sigma * excess ** (2.0 * sigma - 1.0) * torch.sign(P)
 
 
 def f_b(qmu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
@@ -172,7 +230,7 @@ def h_b(qmu: torch.Tensor) -> torch.Tensor:
 # Neural network P_theta(q, mu)
 # =============================================================================
 class NeuralNetwork(nn.Module):
-    def __init__(self, hidden_layers=(30,), activation=None) -> None:
+    def __init__(self, hidden_layers=(30, 30), activation=None) -> None:
         super().__init__()
         activation = activation if activation is not None else nn.Tanh()
         layers: list[nn.Module] = []
@@ -189,9 +247,9 @@ class NeuralNetwork(nn.Module):
 
 
 # =============================================================================
-# PINN solver for the CFGS equation
+# PINN solver for the NLGS equation
 # =============================================================================
-class PINN_CFGS_Solver:
+class PINN_NLGS_Solver:
     def __init__(
         self,
         model: nn.Module,
@@ -204,6 +262,9 @@ class PINN_CFGS_Solver:
         qn_variant: str = "ssbroyden",  # "bfgs" | "ssbfgs" | "ssbroyden"
         qn_H_on_cpu: bool = False,
         b_coeffs: tuple[float, ...] = B_COEFFS,
+        toroidal_s: float = T_S,
+        toroidal_Pc: float = T_PC,
+        toroidal_sigma: float = T_SIGMA,
     ) -> None:
         self.model = model.to(device)
         self.lambda_pde = float(lambda_pde)
@@ -212,6 +273,9 @@ class PINN_CFGS_Solver:
         self.loss_eps = float(loss_eps)
         self.rel_err_eps = float(rel_err_eps)
         self.b_coeffs = tuple(b_coeffs)
+        self.toroidal_s = float(toroidal_s)
+        self.toroidal_Pc = float(toroidal_Pc)
+        self.toroidal_sigma = float(toroidal_sigma)
 
         self.adam = optim.Adam(self.model.parameters(), lr=lr)
         self.quasi_newton = SSBroydenOptimizer(
@@ -271,8 +335,12 @@ class PINN_CFGS_Solver:
     def _P_hat(self, qmu: torch.Tensor) -> torch.Tensor:
         return f_b(qmu, self.b_coeffs) + h_b(qmu) * self.model(qmu)
 
-    # ---- Grad-Shafranov operator Delta_GS P = q^4 P_qq + 2 q^3 P_q + q^2 (1-mu^2) P_mumu ----
-    def _delta_gs(self, qmu: torch.Tensor, create_graph_second: bool) -> torch.Tensor:
+    # ---- Grad-Shafranov linear part: Delta_GS P = q^4 P_qq + 2 q^3 P_q
+    #      + q^2 (1-mu^2) P_mumu, plus the NLGS toroidal source T(P) T'(P).
+    #      Returns (residual, P) so the caller can also use P for diagnostics. ----
+    def _residual(
+        self, qmu: torch.Tensor, create_graph_second: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         qmu = qmu.to(device)
         if not qmu.requires_grad:
             qmu = qmu.requires_grad_(True)
@@ -302,12 +370,30 @@ class PINN_CFGS_Solver:
 
         q = qmu[:, 0:1]
         mu = qmu[:, 1:2]
-        return q**4 * P_qq + 2.0 * q**3 * P_q + q**2 * (1.0 - mu**2) * P_mumu
+        delta_gs = (
+            q**4 * P_qq
+            + 2.0 * q**3 * P_q
+            + q**2 * (1.0 - mu**2) * P_mumu
+        )
+        # Non-linear toroidal source: residual = Delta_GS P + T(P) T'(P).
+        TTp = toroidal_TT_prime(
+            P,
+            s=self.toroidal_s,
+            P_c=self.toroidal_Pc,
+            sigma=self.toroidal_sigma,
+        )
+        return delta_gs + TTp, P
+
+    # Backwards-compatible alias for any helper that still expects only the
+    # operator value; returns just the residual tensor.
+    def _delta_gs(self, qmu: torch.Tensor, create_graph_second: bool) -> torch.Tensor:
+        res, _ = self._residual(qmu, create_graph_second=create_graph_second)
+        return res
 
     # ---- loss (objective + raw MSE residual) ----
     def compute_loss(self, qmu_interior: torch.Tensor, create_graph_second: bool):
         qmu = qmu_interior.detach().clone().requires_grad_(True)
-        res = self._delta_gs(qmu, create_graph_second=create_graph_second)
+        res, _ = self._residual(qmu, create_graph_second=create_graph_second)
         area = (q_max - q_min) * (mu_max - mu_min)
         J_raw = self.lambda_pde * (torch.mean(res**2) * area)
         J_obj = self._transform_objective(J_raw)
@@ -478,14 +564,14 @@ class PINN_CFGS_Solver:
     # ---- training loop ----
     def train(
         self,
-        n_epochs: int = 5000,
+        n_epochs: int = 20000,
         n_collocation: int = 1000,
         train_split: float = 0.8,
         resample_every: int = 500,
-        adam_epochs: int = 2000,
+        adam_epochs: int = 10000,
         verbose_freq: int = 200,
         diag_grid_n: int = 60,
-        patience: int = 2000,
+        patience: int = 20000,
         min_delta: float = 1e-10,
         moving_avg_window: int = 20,
         scheduler_patience: int = 300,
@@ -499,7 +585,14 @@ class PINN_CFGS_Solver:
         lambda_min: float = -1.0,
         lambda_max: float = 1.0,
     ) -> None:
-        print("\nTraining CFGS PINN: Delta_GS P = 0  (Urban et al. 2025, sec. 4.1)")
+        print(
+            "\nTraining NLGS PINN: Delta_GS P + T(P) T'(P) = 0  "
+            "(Urban et al. 2025, sec. 4.2)"
+        )
+        print(
+            f"  Toroidal:        s={self.toroidal_s:g}, "
+            f"P_c={self.toroidal_Pc:g}, sigma={self.toroidal_sigma:g}"
+        )
         print(f"  Domain:          q in [{q_min}, {q_max}], mu in [{mu_min}, {mu_max}]")
         print(f"  Surface coeffs:  b = {self.b_coeffs}")
         if self.loss_transform == "boxcox":
@@ -846,7 +939,7 @@ class PINN_CFGS_Solver:
             print(f"Saved figure to: {save_path}")
         plt.close(fig)
 
-    def save(self, path: str = "../models/pinn_cfgs_ssbroyden.pth") -> None:
+    def save(self, path: str = "../models/pinn_nlgs_ssbroyden.pth") -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(self.model.state_dict(), path)
         print(f"Saved model to: {path}")
@@ -899,7 +992,7 @@ class PINN_CFGS_Solver:
         print(f"Saved field snapshots to: {fields_path}")
 
         summary = {
-            "problem": "CFGS (Urban et al. 2025, sec. 4.1)",
+            "problem": "NLGS (Urban et al. 2025, sec. 4.2)",
             "qn_variant": self.quasi_newton.param_groups[0]["variant"],
             "loss_transform": self.loss_transform,
             "loss_lambda": self.loss_lambda,
@@ -909,6 +1002,9 @@ class PINN_CFGS_Solver:
                 [int(e), float(lam)] for e, lam in self.lambda_history
             ],
             "b_coeffs": list(self.b_coeffs),
+            "toroidal_s": self.toroidal_s,
+            "toroidal_Pc": self.toroidal_Pc,
+            "toroidal_sigma": self.toroidal_sigma,
             "domain": {
                 "q": [q_min, q_max],
                 "mu": [mu_min, mu_max],
@@ -939,7 +1035,7 @@ class PINN_CFGS_Solver:
 
 
 # =============================================================================
-# MAIN — Urban et al. (2025), Table 1 CFGS hyperparameters
+# MAIN — Urban et al. (2025), Table 1 NLGS hyperparameters
 # =============================================================================
 def main() -> None:
     # --- user knobs reproducing Table 2 of the paper ---
@@ -959,12 +1055,12 @@ def main() -> None:
     qn_H_on_cpu = False          # set True if OOM on GPU
     # ---------------------------------------------------
 
-    # Table 1 CFGS: 1 layer, 30 neurons, tanh.
-    model = NeuralNetwork(hidden_layers=(30,), activation=nn.Tanh())
+    # Table 1 NLGS: 2 layers, 30 neurons each, tanh.
+    model = NeuralNetwork(hidden_layers=(30, 30), activation=nn.Tanh())
     print("\nNeural Network Architecture:\n")
     print(model, "\n")
 
-    pinn = PINN_CFGS_Solver(
+    pinn = PINN_NLGS_Solver(
         model=model,
         lr=1e-3,
         lambda_pde=1.0,
@@ -973,19 +1069,22 @@ def main() -> None:
         qn_variant=qn_variant,
         qn_H_on_cpu=qn_H_on_cpu,
         b_coeffs=B_COEFFS,
+        toroidal_s=T_S,
+        toroidal_Pc=T_PC,
+        toroidal_sigma=T_SIGMA,
     )
 
-    # Table 1 CFGS: 5000 total iterations, 2000 Adam, batch size 1000,
+    # Table 1 NLGS: 20 000 total iterations, 10 000 Adam, batch size 8000,
     # training set refreshed every 500 iterations.
     pinn.train(
-        n_epochs=5000,
-        n_collocation=1000,
+        n_epochs=20000,
+        n_collocation=8000,
         train_split=0.8,
         resample_every=500,
-        adam_epochs=2000,
-        verbose_freq=200,
+        adam_epochs=10000,
+        verbose_freq=500,
         diag_grid_n=60,
-        patience=5000,       # disable early stop — match paper's fixed budget
+        patience=20000,      # disable early stop — match paper's fixed budget
         min_delta=1e-10,
         moving_avg_window=20,
         loss_lambda_schedule=loss_lambda_schedule,
@@ -1005,12 +1104,12 @@ def main() -> None:
             f"boxcox_phaseAB_init{lambda_phase_b_init:g}"
             f"_K{lambda_block_size}_d{lambda_step:g}"
         )
-    run_name = f"cfgs_{qn_variant}_{transform_tag}_{run_tag}"
+    run_name = f"nlgs_{qn_variant}_{transform_tag}_{run_tag}"
     run_dir = os.path.join("..", "results", run_name)
     os.makedirs(run_dir, exist_ok=True)
 
     pinn.plot_results(n=80, save_path=os.path.join(run_dir, "results.png"))
-    pinn.save(f"../models/pinn_cfgs_{qn_variant}_{transform_tag}.pth")
+    pinn.save(f"../models/pinn_nlgs_{qn_variant}_{transform_tag}.pth")
     pinn.save_results(
         run_dir,
         n_eval=80,

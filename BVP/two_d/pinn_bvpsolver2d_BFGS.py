@@ -151,6 +151,7 @@ class PINN_NLP_Solver:
         lambda_pde: float = 1.0,
         k: int = K_WAVENUMBER,
         loss_transform: str = "identity",
+        loss_lambda: float = 0.5,
         loss_eps: float = 1e-12,
         rel_err_eps: float = 1e-12,
         qn_variant: str = "ssbroyden",
@@ -160,6 +161,7 @@ class PINN_NLP_Solver:
         self.lambda_pde = float(lambda_pde)
         self.k = int(k)
         self.loss_transform = str(loss_transform)
+        self.loss_lambda = float(loss_lambda)
         self.loss_eps = float(loss_eps)
         self.rel_err_eps = float(rel_err_eps)
 
@@ -190,6 +192,10 @@ class PINN_NLP_Solver:
         self.best_state: dict | None = None
         self.best_val_ma = float("inf")
 
+        # (epoch, lambda) entries recorded each time the phase_ab schedule
+        # commits to a new lambda. Empty when schedule is not used.
+        self.lambda_history: list[tuple[int, float]] = []
+
     def _transform_objective(self, J_raw: torch.Tensor) -> torch.Tensor:
         eps = self.loss_eps
         if self.loss_transform == "identity":
@@ -198,6 +204,17 @@ class PINN_NLP_Solver:
             return torch.sqrt(J_raw + eps)
         if self.loss_transform == "log":
             return torch.log(J_raw + eps)
+        if self.loss_transform == "boxcox":
+            # Box-Cox transformation g_lambda(J + eps) = (expm1(lam * log(J + eps))) / lam,
+            # falling back to log(J + eps) at lam == 0. The expm1 form avoids the
+            # catastrophic cancellation of the naive ((J + eps)^lam - 1) / lam expression
+            # for small |lam|, the regime where Box-Cox interpolates smoothly between
+            # the square-root (lam=0.5) and logarithmic (lam=0) transformations.
+            lam = self.loss_lambda
+            shifted = J_raw + eps
+            if lam == 0.0:
+                return torch.log(shifted)
+            return torch.expm1(lam * torch.log(shifted)) / lam
         raise ValueError(f"Unknown loss_transform={self.loss_transform!r}")
 
     def _phi_hat(self, xy: torch.Tensor) -> torch.Tensor:
@@ -281,6 +298,126 @@ class PINN_NLP_Solver:
         den = np.trapz(np.trapz(u_true**2, xs, axis=1), ys, axis=0)
         return float(np.sqrt(num) / (np.sqrt(den) + self.rel_err_eps))
 
+    # ---- low-level step helpers (used by both the main loop and the
+    #      Phase B trial scan in the boxcox/phase_ab schedule) ----
+    def _adam_step(self, xy_train: torch.Tensor) -> tuple[float, float]:
+        self.adam.zero_grad()
+        J_obj, J_raw = self.compute_loss(xy_train, create_graph_second=True)
+        J_obj.backward()
+        self.adam.step()
+        return float(J_obj.item()), float(J_raw.item())
+
+    def _qn_step(self, xy_train: torch.Tensor) -> tuple[float, float]:
+        holder: dict = {}
+
+        def closure():
+            self.quasi_newton.zero_grad()
+            J_obj_c, J_raw_c = self.compute_loss(xy_train, create_graph_second=True)
+            holder["J_raw"] = J_raw_c
+            J_obj_c.backward()
+            return J_obj_c
+
+        def loss_eval():
+            J_obj_e, _ = self.compute_loss(xy_train, create_graph_second=False)
+            return J_obj_e
+
+        J_obj = self.quasi_newton.step(closure, loss_eval)
+        return float(J_obj.item()), float(holder["J_raw"].item())
+
+    # ---- snapshot / restore for the lambda trial scan ----
+    def _save_qn_snapshot(self) -> dict:
+        H = self.quasi_newton.H
+        return {
+            "model": {
+                k: v.detach().cpu().clone()
+                for k, v in self.model.state_dict().items()
+            },
+            "H": H.detach().clone() if H is not None else None,
+        }
+
+    def _restore_qn_snapshot(self, snap: dict) -> None:
+        self.model.load_state_dict(
+            {k: v.to(device) for k, v in snap["model"].items()}
+        )
+        self.quasi_newton.H = (
+            snap["H"].clone() if snap["H"] is not None else None
+        )
+
+    # ---- Phase B trial scan: run K QN steps for each candidate lambda
+    #      from a saved snapshot, pick the one with the lowest trailing
+    #      raw validation residual, restore its end state. Resets H to
+    #      identity for every candidate so that the comparison is fair
+    #      under the changed objective geometry. ----
+    def _phase_b_trial_block(
+        self,
+        xy_train: torch.Tensor,
+        xy_val: torch.Tensor,
+        K: int,
+        candidates: list[float],
+        diag_grid_n: int,
+        verbose_freq: int,
+        moving_avg_window: int,
+    ) -> tuple[dict, float, float]:
+        snap = self._save_qn_snapshot()
+        trail_n = max(1, min(moving_avg_window, K))
+
+        best = {
+            "trail": float("inf"),
+            "lambda": None,
+            "log": None,
+            "snap": None,
+        }
+
+        for c in candidates:
+            self._restore_qn_snapshot(snap)
+            self.loss_lambda = float(c)
+            # Force a fresh identity H for fairness across candidates.
+            self.quasi_newton.H = None
+
+            log: dict = {
+                "obj_train": [],
+                "J_train": [],
+                "obj_val": [],
+                "J_val": [],
+                "pde_l2": [],
+                "sol_l2": [],
+                "sol_rel_l2": [],
+            }
+            last_pde = float("nan")
+            last_sol = float("nan")
+            last_rel = float("nan")
+
+            for k in range(K):
+                J_obj_v, J_raw_v = self._qn_step(xy_train)
+                with torch.set_grad_enabled(True):
+                    val_obj, val_raw = self.compute_loss(
+                        xy_val, create_graph_second=False
+                    )
+                log["obj_train"].append(J_obj_v)
+                log["J_train"].append(J_raw_v)
+                log["obj_val"].append(float(val_obj.item()))
+                log["J_val"].append(float(val_raw.item()))
+
+                if k == 0 or ((k + 1) % verbose_freq == 0):
+                    last_pde = self.compute_pde_l2(n=diag_grid_n)
+                    last_sol = self.compute_sol_l2(n=diag_grid_n)
+                    last_rel = self.compute_sol_rel_l2(n=diag_grid_n)
+                log["pde_l2"].append(last_pde)
+                log["sol_l2"].append(last_sol)
+                log["sol_rel_l2"].append(last_rel)
+
+            trail = float(np.mean(log["J_val"][-trail_n:]))
+            if trail < best["trail"]:
+                best["trail"] = trail
+                best["lambda"] = float(c)
+                best["log"] = log
+                best["snap"] = self._save_qn_snapshot()
+
+        # Commit to the winner.
+        self.loss_lambda = float(best["lambda"])
+        self._restore_qn_snapshot(best["snap"])
+        return best["log"], best["lambda"], best["trail"]
+
     def train(
         self,
         n_epochs: int = 20000,
@@ -297,6 +434,12 @@ class PINN_NLP_Solver:
         scheduler_threshold: float = 1e-4,
         scheduler_gamma: float = 0.9,
         scheduler_min_lr: float = 1e-6,
+        loss_lambda_schedule: str = "none",  # "none" | "phase_ab"
+        lambda_phase_b_init: float = 0.5,
+        lambda_block_size: int = 100,
+        lambda_step: float = 0.1,
+        lambda_min: float = -1.0,
+        lambda_max: float = 1.0,
     ) -> None:
         print(
             "\nTraining NLP PINN: ∇^2 phi - e^{phi} = r(x, y)  "
@@ -304,7 +447,13 @@ class PINN_NLP_Solver:
         )
         print(f"  Domain:          x in [{x_min}, {x_max}], y in [{y_min}, {y_max}]")
         print(f"  Wavenumber k:    {self.k}")
-        print(f"  Loss transform:  {self.loss_transform}")
+        if self.loss_transform == "boxcox":
+            print(
+                f"  Loss transform:  {self.loss_transform}  "
+                f"(lambda={self.loss_lambda:g}, eps={self.loss_eps:g})"
+            )
+        else:
+            print(f"  Loss transform:  {self.loss_transform}")
         print(
             f"  Optimizers:      Adam ({adam_epochs} iters)"
             f" then {self.quasi_newton.param_groups[0]['variant'].upper()}"
@@ -320,6 +469,29 @@ class PINN_NLP_Solver:
             raise ValueError("resample_every must be >= 1.")
         if adam_epochs < 0 or adam_epochs >= n_epochs:
             raise ValueError("adam_epochs must be in [0, n_epochs - 1].")
+
+        schedule_on = loss_lambda_schedule == "phase_ab"
+        if schedule_on:
+            if self.loss_transform != "boxcox":
+                raise ValueError(
+                    "loss_lambda_schedule='phase_ab' requires loss_transform='boxcox'."
+                )
+            if not (lambda_min <= lambda_phase_b_init <= lambda_max):
+                raise ValueError(
+                    "lambda_phase_b_init must lie in [lambda_min, lambda_max]."
+                )
+            if lambda_block_size < 1:
+                raise ValueError("lambda_block_size must be >= 1.")
+            if lambda_step <= 0:
+                raise ValueError("lambda_step must be > 0.")
+            # Phase A: identity transformation (Box-Cox at lambda=1).
+            self.loss_lambda = 1.0
+            print(
+                f"  Lambda schedule: phase_ab  "
+                f"(K={lambda_block_size}, delta={lambda_step:g}, "
+                f"clip=[{lambda_min:g},{lambda_max:g}], "
+                f"phase_b_init={lambda_phase_b_init:g})"
+            )
 
         n_train = int(n_collocation * train_split)
         n_train = min(max(n_train, 1), n_collocation - 1)
@@ -365,9 +537,91 @@ class PINN_NLP_Solver:
         last_sol_l2 = np.nan
         last_sol_rel_l2 = np.nan
 
+        skip_remaining = 0  # set by the trial scan to absorb the next K-1 iterations
+
         for epoch in range(1, n_epochs + 1):
+            if skip_remaining > 0:
+                skip_remaining -= 1
+                continue
+
             if epoch != 1 and ((epoch - 1) % resample_every == 0):
                 xy_train, xy_val = resample_block()
+
+            # ---- Phase A -> Phase B transition (lambda schedule) ----
+            if schedule_on and epoch == adam_epochs + 1:
+                self.loss_lambda = float(lambda_phase_b_init)
+                self.quasi_newton.H = None
+                self.lambda_history.append((epoch, self.loss_lambda))
+                print(
+                    f"Epoch {epoch:6d} [PHASE_B_START] | "
+                    f"lambda <- {self.loss_lambda:g} (H reset)"
+                )
+
+            # ---- Phase B: at every K-block boundary, run the lambda trial scan ----
+            in_phase_b = epoch > adam_epochs
+            phase_b_idx = epoch - adam_epochs - 1
+            at_block_boundary = (
+                schedule_on
+                and in_phase_b
+                and phase_b_idx % lambda_block_size == 0
+            )
+            block_fits = epoch + lambda_block_size - 1 <= n_epochs
+            if at_block_boundary and block_fits:
+                cands_set = {
+                    max(lambda_min, self.loss_lambda - lambda_step),
+                    self.loss_lambda,
+                    min(lambda_max, self.loss_lambda + lambda_step),
+                }
+                candidates = sorted(cands_set)
+                trial_log, new_lambda, trail_val = self._phase_b_trial_block(
+                    xy_train,
+                    xy_val,
+                    K=lambda_block_size,
+                    candidates=candidates,
+                    diag_grid_n=diag_grid_n,
+                    verbose_freq=verbose_freq,
+                    moving_avg_window=moving_avg_window,
+                )
+
+                self.obj_train.extend(trial_log["obj_train"])
+                self.obj_val.extend(trial_log["obj_val"])
+                self.J_train.extend(trial_log["J_train"])
+                self.J_val.extend(trial_log["J_val"])
+                self.pde_l2.extend(trial_log["pde_l2"])
+                self.sol_l2.extend(trial_log["sol_l2"])
+                self.sol_rel_l2.extend(trial_log["sol_rel_l2"])
+
+                last_pde_l2 = trial_log["pde_l2"][-1]
+                last_sol_l2 = trial_log["sol_l2"][-1]
+                last_sol_rel_l2 = trial_log["sol_rel_l2"][-1]
+
+                for v in trial_log["obj_val"]:
+                    ma_buf.append(v)
+                    if len(ma_buf) > moving_avg_window:
+                        ma_buf.pop(0)
+                val_ma = float(np.mean(ma_buf)) if ma_buf else float("inf")
+                if val_ma + min_delta < self.best_val_ma:
+                    self.best_val_ma = val_ma
+                    self.best_state = {
+                        k: v.detach().cpu().clone()
+                        for k, v in self.model.state_dict().items()
+                    }
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += lambda_block_size
+
+                self.lambda_history.append((epoch, float(new_lambda)))
+                cand_str = ", ".join(f"{c:+.3f}" for c in candidates)
+                print(
+                    f"Epoch {epoch:6d} [LAMBDA_TRIAL] | candidates [{cand_str}]"
+                    f" -> lambda = {new_lambda:+.3f}  "
+                    f"(trail valJ = {trail_val:.3e})"
+                )
+
+                # The trial covered epochs [epoch, epoch + K - 1] inclusive.
+                # The next K - 1 main-loop iterations are absorbed via skip_remaining.
+                skip_remaining = lambda_block_size - 1
+                continue
 
             use_adam = epoch <= adam_epochs
             opt = self.adam if use_adam else self.quasi_newton
@@ -562,8 +816,12 @@ class PINN_NLP_Solver:
             "problem": "NLP (Urban et al. 2025, sec. 5)",
             "qn_variant": self.quasi_newton.param_groups[0]["variant"],
             "loss_transform": self.loss_transform,
+            "loss_lambda": self.loss_lambda,
             "loss_eps": self.loss_eps,
             "lambda_pde": self.lambda_pde,
+            "lambda_history": [
+                [int(e), float(lam)] for e, lam in self.lambda_history
+            ],
             "k_wavenumber": self.k,
             "domain": {
                 "x": [x_min, x_max],
@@ -600,7 +858,18 @@ class PINN_NLP_Solver:
 def main() -> None:
     # --- user knobs reproducing the paper's optimizer/loss sweeps ---
     qn_variant = "ssbroyden"     # "bfgs", "ssbfgs", "ssbroyden"
-    loss_transform = "identity"  # "identity", "sqrt", "log"
+    loss_transform = "identity"  # "identity", "sqrt", "log", "boxcox"
+    loss_lambda = 0.5            # only used when loss_transform == "boxcox"
+    # Phase A / Phase B lambda schedule (requires loss_transform == "boxcox").
+    # When "phase_ab", Phase A trains with lambda=1 (identity) and Phase B
+    # adapts lambda by a 3-candidate trial scan every `lambda_block_size` QN
+    # epochs, starting from `lambda_phase_b_init`.
+    loss_lambda_schedule = "none"  # "none" | "phase_ab"
+    lambda_phase_b_init = 0.5
+    lambda_block_size = 100
+    lambda_step = 0.1
+    lambda_min = -1.0
+    lambda_max = 1.0
     qn_H_on_cpu = False
     # ---------------------------------------------------------------
 
@@ -615,6 +884,7 @@ def main() -> None:
         lambda_pde=1.0,
         k=K_WAVENUMBER,
         loss_transform=loss_transform,
+        loss_lambda=loss_lambda,
         qn_variant=qn_variant,
         qn_H_on_cpu=qn_H_on_cpu,
     )
@@ -630,15 +900,29 @@ def main() -> None:
         diag_grid_n=60,
         patience=20000,  # disable early stop — match paper's fixed budget
         min_delta=1e-10,
+        loss_lambda_schedule=loss_lambda_schedule,
+        lambda_phase_b_init=lambda_phase_b_init,
+        lambda_block_size=lambda_block_size,
+        lambda_step=lambda_step,
+        lambda_min=lambda_min,
+        lambda_max=lambda_max,
     )
 
     run_tag = time.strftime("%Y%m%d_%H%M%S")
-    run_name = f"nlp_{qn_variant}_{loss_transform}_{run_tag}"
+    transform_tag = (
+        f"boxcox_lam{loss_lambda:g}" if loss_transform == "boxcox" else loss_transform
+    )
+    if loss_lambda_schedule == "phase_ab":
+        transform_tag = (
+            f"boxcox_phaseAB_init{lambda_phase_b_init:g}"
+            f"_K{lambda_block_size}_d{lambda_step:g}"
+        )
+    run_name = f"nlp_{qn_variant}_{transform_tag}_{run_tag}"
     run_dir = os.path.join("..", "results", run_name)
     os.makedirs(run_dir, exist_ok=True)
 
     pinn.plot_results(n=80, save_path=os.path.join(run_dir, "results.png"))
-    pinn.save(f"../models/pinn_nlp_{qn_variant}_{loss_transform}.pth")
+    pinn.save(f"../models/pinn_nlp_{qn_variant}_{transform_tag}.pth")
     pinn.save_results(
         run_dir,
         n_eval=80,

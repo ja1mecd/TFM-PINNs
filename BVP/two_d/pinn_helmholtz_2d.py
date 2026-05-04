@@ -1,59 +1,43 @@
 """
-Current-Free Grad-Shafranov (CFGS) PINN — replication of section 4.1 of
+2D Helmholtz (2DH) PINN — replication of section 5, "2D Helmholtz equation",
+of
 
     Urbán, Stefanou & Pons, "Unveiling the optimization process of
     physics informed neural networks: How accurate and competitive can
     PINNs be?", J. Comp. Phys. 523, 113656 (2025).
 
-Equation (eq. 28 of the paper, with T = 0):
+Equation (eqs. 37-38 of the paper):
 
-    Delta_GS P = 0,
+    ∇^2 u + k^2 u - q(x, y) = 0,
+    q(x, y) = -sin(pi a1 x) sin(pi a2 y) [pi^2 (a1^2 + a2^2) - k^2],
 
-where (eq. 29, in compactified spherical coordinates q = 1/r, mu = cos(theta))
+with analytic solution
 
-    Delta_GS = q^2 ( q^2 d^2/dq^2 + 2 q d/dq ) + q^2 (1 - mu^2) d^2/dmu^2
-             = q^4 P_qq + 2 q^3 P_q + q^2 (1 - mu^2) P_mumu.
+    u_exact(x, y) = sin(pi a1 x) sin(pi a2 y),
 
-Domain (Table 1): (q, mu) in [0, 1] x [-1, 1].
+on the square [-1, 1] x [-1, 1]. The wavenumbers (a1, a2) are integers and
+k must satisfy k^2 != pi^2 (n^2 + m^2) for any (n, m) in Z^2 so that the
+homogeneous problem with periodic BCs has only the zero solution.
 
-Analytic solution (eq. 32):
+Boundary conditions are *periodic* in x and y. They are hard-enforced by
+input encoding: the network sees the lifted input
 
-    P_an(q, mu) = (1 - mu^2) * sum_{l=1}^{lmax} q^l * b_l * P'_l(mu),
+    (cos(pi x), sin(pi x), cos(pi y), sin(pi y))
 
-where P'_l is the derivative of the Legendre polynomial. This script uses the
-"dipole + quadrupole" case mentioned in section 4.1 (b_1 != 0, b_2 != 0, all
-others zero). The coefficients b_l are free parameters controlling the
-surface field; the paper does not fix specific values, so we choose a simple
-dipole-dominated pair (b_1 = 1, b_2 = 1) as a default.
+and outputs u directly, without any additive bubble. This guarantees
+u(x + 2, y) = u(x, y) and u(x, y + 2) = u(x, y) by construction (paper eq. 39).
 
-Hard enforcement of Dirichlet BCs (eqs. 30-31):
+Two configurations from the paper:
+    - Low wavenumber  (a1, a2) = (1, 4), k = 1: 2 layers, 20 neurons,
+      20 000 iterations, 5 000 Adam, batch 10 000.
+    - High wavenumber (a1, a2) = (6, 6), k = 1: 3 layers, 30 neurons,
+      50 000 iterations, 5 000 Adam, batch 10 000.
 
-    P(q, mu) = f_b(q, mu) + h_b(q, mu) * N(q, mu; theta),
-    f_b     = q * (1 - mu^2) * sum_l b_l * P'_l(mu),
-    h_b     = q * (q - 1) * (1 - mu^2),
-
-so that P vanishes on the axis (mu = +/- 1) and at infinity (q = 0), and
-equals the prescribed surface data at q = 1.
-
-Training pipeline (paper, Table 1 CFGS):
-    - tanh activations
-    - Layers: 1, Neurons: 30
-    - Adam for 2000 iterations, then quasi-Newton for 3000 more (total 5000)
-    - Batch (collocation) size: 1000; training set refreshed every 500 iters
-    - Loss: MSE of the PDE residual over the interior
-
-This script exposes two knobs for the paper's headline sweep:
-    --variant       one of {"bfgs", "ssbfgs", "ssbroyden"}
-    --loss_transform one of {"identity", "sqrt", "log", "boxcox"}
-
-which together reproduce the combinations in Table 2 of the paper. The
-``boxcox`` option additionally reads ``loss_lambda`` and applies the Box-Cox
-transformation g_lambda(J + eps) = (expm1(lambda * log(J + eps))) / lambda
-(or log(J + eps) when lambda == 0), evaluated in a numerically stable form
-that avoids catastrophic cancellation for small |lambda|. The legacy
-``sqrt`` and ``log`` branches are kept verbatim for reproducibility of
-historical runs; ``boxcox`` with loss_lambda=0.5 (resp. 0.0) is equivalent
-up to an affine constant.
+The quasi-Newton variant, the loss transform, and the Phase A / Phase B
+lambda schedule can be toggled in `main()`. The ``boxcox`` option applies
+g_lambda(J + eps) = expm1(lambda * log(J + eps)) / lambda  (or log(J + eps)
+when lambda == 0), evaluated in a numerically stable form that avoids
+catastrophic cancellation for small |lambda|.
 """
 
 from __future__ import annotations
@@ -71,8 +55,6 @@ import matplotlib
 matplotlib.use("Agg")  # headless: no display needed on the remote server
 import matplotlib.pyplot as plt  # noqa: E402
 
-# Make the shared optimizer importable when running `python pinn_ssbroyden_2d.py`
-# from this directory (BVP/two_d/).
 _OPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "optimizers")
 if _OPT_DIR not in sys.path:
     sys.path.insert(0, _OPT_DIR)
@@ -86,7 +68,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 if device.type == "cuda":
-    _ = torch.zeros(1, device=device)
     try:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -96,87 +77,73 @@ if device.type == "cuda":
 
 
 # =============================================================================
-# PROBLEM SETUP: CFGS in compactified spherical (q, mu)
+# PROBLEM SETUP: 2D Helmholtz on [-1, 1] x [-1, 1] with periodic BCs
 # =============================================================================
-q_min, q_max = 0.0, 1.0
-mu_min, mu_max = -1.0, 1.0
+x_min, x_max = -1.0, 1.0
+y_min, y_max = -1.0, 1.0
 
-# Dipole-quadrupole surface coefficients b_l for l = 1, ..., lmax.
-# Paper: "we focus on a dipole-quadrupole solution (b_1, b_2 != 0, b_{l>2} = 0)".
-# Specific values are a free parameter; we pick a dipole-dominated pair.
-B_COEFFS = (1.0, 1.0)
+# Default to the low-wavenumber configuration. Override in main() for the
+# high-wavenumber case (a1 = a2 = 6, k = 1).
+A1_WAVENUMBER = 1
+A2_WAVENUMBER = 4
+K_WAVENUMBER = 1
 
 
-def legendre_derivatives(mu: torch.Tensor, lmax: int) -> list[torch.Tensor]:
-    """Return [P'_1(mu), P'_2(mu), ..., P'_lmax(mu)] using the stable recursion
+def u_exact(
+    xy: torch.Tensor,
+    a1: int = A1_WAVENUMBER,
+    a2: int = A2_WAVENUMBER,
+) -> torch.Tensor:
+    """Analytic solution u(x, y) = sin(pi a1 x) sin(pi a2 y) (paper, p. 12)."""
+    x = xy[:, 0:1]
+    y = xy[:, 1:2]
+    return torch.sin(np.pi * a1 * x) * torch.sin(np.pi * a2 * y)
 
-        P_0  = 1,  P_1 = mu,
-        P_l  = ((2l-1) mu P_{l-1} - (l-1) P_{l-2}) / l,
-        P'_l = (l / (mu^2 - 1)) * (mu P_l - P_{l-1})  for mu^2 != 1.
 
-    To avoid the singularity at mu = +/-1 we use the equivalent form
+def q_source(
+    xy: torch.Tensor,
+    a1: int = A1_WAVENUMBER,
+    a2: int = A2_WAVENUMBER,
+    k: float = K_WAVENUMBER,
+) -> torch.Tensor:
+    """Source term q(x, y) such that ∇^2 u_exact + k^2 u_exact = q (paper eq. 38).
 
-        P'_l = l * (P_{l-1} - mu * P_l) / (1 - mu^2 + eps)
-
-    with a small epsilon clamp. Returns a list of tensors of the same shape as mu.
+    q(x, y) = -sin(pi a1 x) sin(pi a2 y) [pi^2 (a1^2 + a2^2) - k^2].
     """
-    eps = 1e-12
-    P = [torch.ones_like(mu), mu.clone()]
-    for l in range(2, lmax + 1):
-        P_next = ((2 * l - 1) * mu * P[l - 1] - (l - 1) * P[l - 2]) / l
-        P.append(P_next)
-
-    one_minus_mu2 = torch.clamp(1.0 - mu**2, min=eps)
-    derivs: list[torch.Tensor] = []
-    for l in range(1, lmax + 1):
-        dP = l * (P[l - 1] - mu * P[l]) / one_minus_mu2
-        derivs.append(dP)
-    return derivs
+    x = xy[:, 0:1]
+    y = xy[:, 1:2]
+    factor = (np.pi**2) * (a1**2 + a2**2) - k**2
+    return -torch.sin(np.pi * a1 * x) * torch.sin(np.pi * a2 * y) * factor
 
 
-def _surface_sum(mu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
-    """Return sum_l b_l * P'_l(mu)."""
-    derivs = legendre_derivatives(mu, lmax=len(b_coeffs))
-    total = torch.zeros_like(mu)
-    for b, dP in zip(b_coeffs, derivs):
-        total = total + b * dP
-    return total
-
-
-def P_exact(qmu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
-    """Analytic current-free solution (paper eq. 32)."""
-    q = qmu[:, 0:1]
-    mu = qmu[:, 1:2]
-    derivs = legendre_derivatives(mu, lmax=len(b_coeffs))
-    poly = torch.zeros_like(q)
-    for l, (b, dP) in enumerate(zip(b_coeffs, derivs), start=1):
-        poly = poly + (q**l) * b * dP
-    return (1.0 - mu**2) * poly
-
-
-def f_b(qmu: torch.Tensor, b_coeffs=B_COEFFS) -> torch.Tensor:
-    """Smooth function satisfying the Dirichlet BCs (paper eq. 30)."""
-    q = qmu[:, 0:1]
-    mu = qmu[:, 1:2]
-    return q * (1.0 - mu**2) * _surface_sum(mu, b_coeffs)
-
-
-def h_b(qmu: torch.Tensor) -> torch.Tensor:
-    """Bubble that vanishes on the boundary of the (q, mu) rectangle (paper eq. 31)."""
-    q = qmu[:, 0:1]
-    mu = qmu[:, 1:2]
-    return q * (q - 1.0) * (1.0 - mu**2)
+# Backwards-compatible aliases (any historical code path expecting
+# `phi_exact` / `r_source` will keep resolving).
+phi_exact = u_exact
+r_source = q_source
 
 
 # =============================================================================
-# Neural network P_theta(q, mu)
+# Neural network u_theta(x, y) with periodic input encoding
+# (paper eq. 39: u(x, y) = N(cos(pi x), sin(pi x), cos(pi y), sin(pi y)))
 # =============================================================================
 class NeuralNetwork(nn.Module):
-    def __init__(self, hidden_layers=(30,), activation=None) -> None:
+    """MLP with a hard-enforced 2-periodic input lift.
+
+    The forward pass takes a tensor of shape (B, 2) holding (x, y) and feeds
+    the four-feature vector (cos(pi x), sin(pi x), cos(pi y), sin(pi y)) into
+    the underlying MLP. Because cos and sin are 2-periodic, the resulting
+    surrogate satisfies u(x + 2, y) = u(x, y) and u(x, y + 2) = u(x, y) by
+    construction. This is the periodic counterpart of the additive
+    Dirichlet ansatz used in the NLP and CFGS solvers.
+    """
+
+    def __init__(self, hidden_layers=(20, 20), activation=None) -> None:
         super().__init__()
         activation = activation if activation is not None else nn.Tanh()
         layers: list[nn.Module] = []
-        in_dim = 2
+        # Input dim is 4 because the periodic lift produces (cos pi x,
+        # sin pi x, cos pi y, sin pi y).
+        in_dim = 4
         for h in hidden_layers:
             layers.append(nn.Linear(in_dim, h))
             layers.append(activation)
@@ -184,34 +151,52 @@ class NeuralNetwork(nn.Module):
         layers.append(nn.Linear(in_dim, 1))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+    def forward(self, xy: torch.Tensor) -> torch.Tensor:
+        # xy has shape (B, 2). Lift to the periodic feature space and run
+        # the MLP. The lift uses a fixed period of 2 in each axis, matching
+        # the [-1, 1] domain.
+        x = xy[:, 0:1]
+        y = xy[:, 1:2]
+        features = torch.cat(
+            [
+                torch.cos(np.pi * x),
+                torch.sin(np.pi * x),
+                torch.cos(np.pi * y),
+                torch.sin(np.pi * y),
+            ],
+            dim=1,
+        )
+        return self.net(features)
 
 
 # =============================================================================
-# PINN solver for the CFGS equation
+# PINN solver
 # =============================================================================
-class PINN_CFGS_Solver:
+class PINN_Helmholtz_Solver:
     def __init__(
         self,
         model: nn.Module,
         lr: float = 1e-3,
         lambda_pde: float = 1.0,
-        loss_transform: str = "identity",  # "identity" | "sqrt" | "log" | "boxcox"
+        a1: int = A1_WAVENUMBER,
+        a2: int = A2_WAVENUMBER,
+        k: float = K_WAVENUMBER,
+        loss_transform: str = "identity",
         loss_lambda: float = 0.5,
         loss_eps: float = 1e-12,
         rel_err_eps: float = 1e-12,
-        qn_variant: str = "ssbroyden",  # "bfgs" | "ssbfgs" | "ssbroyden"
+        qn_variant: str = "ssbroyden",
         qn_H_on_cpu: bool = False,
-        b_coeffs: tuple[float, ...] = B_COEFFS,
     ) -> None:
         self.model = model.to(device)
         self.lambda_pde = float(lambda_pde)
+        self.a1 = int(a1)
+        self.a2 = int(a2)
+        self.k = float(k)
         self.loss_transform = str(loss_transform)
         self.loss_lambda = float(loss_lambda)
         self.loss_eps = float(loss_eps)
         self.rel_err_eps = float(rel_err_eps)
-        self.b_coeffs = tuple(b_coeffs)
 
         self.adam = optim.Adam(self.model.parameters(), lr=lr)
         self.quasi_newton = SSBroydenOptimizer(
@@ -229,7 +214,6 @@ class PINN_CFGS_Solver:
             H_on_cpu=qn_H_on_cpu,
         )
 
-        # Logs
         self.obj_train: list[float] = []
         self.obj_val: list[float] = []
         self.J_train: list[float] = []
@@ -245,7 +229,6 @@ class PINN_CFGS_Solver:
         # commits to a new lambda. Empty when schedule is not used.
         self.lambda_history: list[tuple[int, float]] = []
 
-    # ---- transform J -> objective ----
     def _transform_objective(self, J_raw: torch.Tensor) -> torch.Tensor:
         eps = self.loss_eps
         if self.loss_transform == "identity":
@@ -258,8 +241,8 @@ class PINN_CFGS_Solver:
             # Box-Cox transformation g_lambda(J + eps) = (expm1(lam * log(J + eps))) / lam,
             # falling back to log(J + eps) at lam == 0. The expm1 form avoids the
             # catastrophic cancellation of the naive ((J + eps)^lam - 1) / lam expression
-            # for small |lam|, which is exactly the regime where Box-Cox is most useful
-            # as a continuous interpolation between sqrt (lam=0.5) and log (lam=0).
+            # for small |lam|, the regime where Box-Cox interpolates smoothly between
+            # the square-root (lam=0.5) and logarithmic (lam=0) transformations.
             lam = self.loss_lambda
             shifted = J_raw + eps
             if lam == 0.0:
@@ -267,115 +250,114 @@ class PINN_CFGS_Solver:
             return torch.expm1(lam * torch.log(shifted)) / lam
         raise ValueError(f"Unknown loss_transform={self.loss_transform!r}")
 
-    # ---- hard Dirichlet BC on the (q, mu) rectangle ----
-    def _P_hat(self, qmu: torch.Tensor) -> torch.Tensor:
-        return f_b(qmu, self.b_coeffs) + h_b(qmu) * self.model(qmu)
+    def _u_hat(self, xy: torch.Tensor) -> torch.Tensor:
+        # The model encodes periodicity internally, so no additive ansatz.
+        return self.model(xy)
 
-    # ---- Grad-Shafranov operator Delta_GS P = q^4 P_qq + 2 q^3 P_q + q^2 (1-mu^2) P_mumu ----
-    def _delta_gs(self, qmu: torch.Tensor, create_graph_second: bool) -> torch.Tensor:
-        qmu = qmu.to(device)
-        if not qmu.requires_grad:
-            qmu = qmu.requires_grad_(True)
+    # Backwards-compat alias for any caller still expecting `_phi_hat`.
+    _phi_hat = _u_hat
 
-        P = self._P_hat(qmu)
+    def _residual(self, xy: torch.Tensor, create_graph_second: bool) -> torch.Tensor:
+        xy = xy.to(device)
+        if not xy.requires_grad:
+            xy = xy.requires_grad_(True)
+
+        u = self._u_hat(xy)
 
         grads = torch.autograd.grad(
-            P, qmu, grad_outputs=torch.ones_like(P), create_graph=True
+            u, xy, grad_outputs=torch.ones_like(u), create_graph=True
         )[0]
-        P_q = grads[:, 0:1]
-        P_mu = grads[:, 1:2]
+        u_x = grads[:, 0:1]
+        u_y = grads[:, 1:2]
 
-        P_qq = torch.autograd.grad(
-            P_q,
-            qmu,
-            grad_outputs=torch.ones_like(P_q),
+        u_xx = torch.autograd.grad(
+            u_x,
+            xy,
+            grad_outputs=torch.ones_like(u_x),
             create_graph=create_graph_second,
             retain_graph=True,
         )[0][:, 0:1]
-
-        P_mumu = torch.autograd.grad(
-            P_mu,
-            qmu,
-            grad_outputs=torch.ones_like(P_mu),
+        u_yy = torch.autograd.grad(
+            u_y,
+            xy,
+            grad_outputs=torch.ones_like(u_y),
             create_graph=create_graph_second,
         )[0][:, 1:2]
 
-        q = qmu[:, 0:1]
-        mu = qmu[:, 1:2]
-        return q**4 * P_qq + 2.0 * q**3 * P_q + q**2 * (1.0 - mu**2) * P_mumu
+        # Helmholtz residual: ∇^2 u + k^2 u - q(x, y).
+        q = q_source(xy, self.a1, self.a2, self.k)
+        return (u_xx + u_yy) + (self.k**2) * u - q
 
-    # ---- loss (objective + raw MSE residual) ----
-    def compute_loss(self, qmu_interior: torch.Tensor, create_graph_second: bool):
-        qmu = qmu_interior.detach().clone().requires_grad_(True)
-        res = self._delta_gs(qmu, create_graph_second=create_graph_second)
-        area = (q_max - q_min) * (mu_max - mu_min)
+    def compute_loss(self, xy_interior: torch.Tensor, create_graph_second: bool):
+        xy = xy_interior.detach().clone().requires_grad_(True)
+        res = self._residual(xy, create_graph_second=create_graph_second)
+        area = (x_max - x_min) * (y_max - y_min)
         J_raw = self.lambda_pde * (torch.mean(res**2) * area)
         J_obj = self._transform_objective(J_raw)
         return J_obj, J_raw.detach()
 
-    # ---- diagnostics on a uniform (q, mu) grid ----
     def _grid(self, n: int):
-        qs = np.linspace(q_min, q_max, n)
-        mus = np.linspace(mu_min, mu_max, n)
-        QQ, MM = np.meshgrid(qs, mus, indexing="xy")
-        QM = np.stack([QQ.ravel(), MM.ravel()], axis=1).astype(np.float32)
-        return qs, mus, QQ, MM, QM
+        xs = np.linspace(x_min, x_max, n)
+        ys = np.linspace(y_min, y_max, n)
+        XX, YY = np.meshgrid(xs, ys, indexing="xy")
+        XY = np.stack([XX.ravel(), YY.ravel()], axis=1).astype(np.float32)
+        return xs, ys, XX, YY, XY
 
     def compute_pde_l2(self, n: int = 60) -> float:
-        qs, mus, _, _, QM = self._grid(n)
-        QMt = torch.from_numpy(QM).to(device)
+        xs, ys, _, _, XY = self._grid(n)
+        XYt = torch.from_numpy(XY).to(device)
         res = (
-            self._delta_gs(QMt, create_graph_second=False)
+            self._residual(XYt, create_graph_second=False)
             .detach()
             .cpu()
             .numpy()
             .reshape(n, n)
         )
-        intMu = np.trapz(res**2, mus, axis=0)
-        return float(np.sqrt(np.trapz(intMu, qs, axis=0)))
+        intX = np.trapz(res**2, xs, axis=1)
+        return float(np.sqrt(np.trapz(intX, ys, axis=0)))
 
     def compute_sol_l2(self, n: int = 60) -> float:
-        qs, mus, _, _, QM = self._grid(n)
-        QMt = torch.from_numpy(QM).to(device)
-        u_true = P_exact(QMt).detach().cpu().numpy().reshape(n, n)
+        xs, ys, _, _, XY = self._grid(n)
+        XYt = torch.from_numpy(XY).to(device)
+        u_true = u_exact(XYt, self.a1, self.a2).detach().cpu().numpy().reshape(n, n)
         with torch.no_grad():
-            u_pred = self._P_hat(QMt).cpu().numpy().reshape(n, n)
+            u_pred = self._u_hat(XYt).cpu().numpy().reshape(n, n)
         diff = u_pred - u_true
-        intMu = np.trapz(diff**2, mus, axis=0)
-        return float(np.sqrt(np.trapz(intMu, qs, axis=0)))
+        intX = np.trapz(diff**2, xs, axis=1)
+        return float(np.sqrt(np.trapz(intX, ys, axis=0)))
 
     def compute_sol_rel_l2(self, n: int = 60) -> float:
-        qs, mus, _, _, QM = self._grid(n)
-        QMt = torch.from_numpy(QM).to(device)
-        u_true = P_exact(QMt).detach().cpu().numpy().reshape(n, n)
+        xs, ys, _, _, XY = self._grid(n)
+        XYt = torch.from_numpy(XY).to(device)
+        u_true = u_exact(XYt, self.a1, self.a2).detach().cpu().numpy().reshape(n, n)
         with torch.no_grad():
-            u_pred = self._P_hat(QMt).cpu().numpy().reshape(n, n)
+            u_pred = self._u_hat(XYt).cpu().numpy().reshape(n, n)
         diff = u_pred - u_true
-        num = np.trapz(np.trapz(diff**2, mus, axis=0), qs, axis=0)
-        den = np.trapz(np.trapz(u_true**2, mus, axis=0), qs, axis=0)
+        num = np.trapz(np.trapz(diff**2, xs, axis=1), ys, axis=0)
+        den = np.trapz(np.trapz(u_true**2, xs, axis=1), ys, axis=0)
         return float(np.sqrt(num) / (np.sqrt(den) + self.rel_err_eps))
 
     # ---- low-level step helpers (used by both the main loop and the
     #      Phase B trial scan in the boxcox/phase_ab schedule) ----
-    def _adam_step(self, qmu_train: torch.Tensor) -> tuple[float, float]:
+    def _adam_step(self, xy_train: torch.Tensor) -> tuple[float, float]:
         self.adam.zero_grad()
-        J_obj, J_raw = self.compute_loss(qmu_train, create_graph_second=True)
+        J_obj, J_raw = self.compute_loss(xy_train, create_graph_second=True)
         J_obj.backward()
         self.adam.step()
         return float(J_obj.item()), float(J_raw.item())
 
-    def _qn_step(self, qmu_train: torch.Tensor) -> tuple[float, float]:
+    def _qn_step(self, xy_train: torch.Tensor) -> tuple[float, float]:
         holder: dict = {}
 
         def closure():
             self.quasi_newton.zero_grad()
-            J_obj_c, J_raw_c = self.compute_loss(qmu_train, create_graph_second=True)
+            J_obj_c, J_raw_c = self.compute_loss(xy_train, create_graph_second=True)
             holder["J_raw"] = J_raw_c
             J_obj_c.backward()
             return J_obj_c
 
         def loss_eval():
-            J_obj_e, _ = self.compute_loss(qmu_train, create_graph_second=False)
+            J_obj_e, _ = self.compute_loss(xy_train, create_graph_second=False)
             return J_obj_e
 
         J_obj = self.quasi_newton.step(closure, loss_eval)
@@ -403,12 +385,12 @@ class PINN_CFGS_Solver:
     # ---- Phase B trial scan: run K QN steps for each candidate lambda
     #      from a saved snapshot, pick the one with the lowest trailing
     #      raw validation residual, restore its end state. Resets H to
-    #      identity for every candidate (including the incumbent) so that
-    #      the comparison is fair under the changed objective geometry. ----
+    #      identity for every candidate so that the comparison is fair
+    #      under the changed objective geometry. ----
     def _phase_b_trial_block(
         self,
-        qmu_train: torch.Tensor,
-        qmu_val: torch.Tensor,
+        xy_train: torch.Tensor,
+        xy_val: torch.Tensor,
         K: int,
         candidates: list[float],
         diag_grid_n: int,
@@ -445,10 +427,10 @@ class PINN_CFGS_Solver:
             last_rel = float("nan")
 
             for k in range(K):
-                J_obj_v, J_raw_v = self._qn_step(qmu_train)
+                J_obj_v, J_raw_v = self._qn_step(xy_train)
                 with torch.set_grad_enabled(True):
                     val_obj, val_raw = self.compute_loss(
-                        qmu_val, create_graph_second=False
+                        xy_val, create_graph_second=False
                     )
                 log["obj_train"].append(J_obj_v)
                 log["J_train"].append(J_raw_v)
@@ -475,20 +457,19 @@ class PINN_CFGS_Solver:
         self._restore_qn_snapshot(best["snap"])
         return best["log"], best["lambda"], best["trail"]
 
-    # ---- training loop ----
     def train(
         self,
-        n_epochs: int = 5000,
-        n_collocation: int = 1000,
+        n_epochs: int = 20000,
+        n_collocation: int = 8000,
         train_split: float = 0.8,
         resample_every: int = 500,
-        adam_epochs: int = 2000,
-        verbose_freq: int = 200,
+        adam_epochs: int = 10000,
+        verbose_freq: int = 500,
         diag_grid_n: int = 60,
-        patience: int = 2000,
+        patience: int = 20000,
         min_delta: float = 1e-10,
         moving_avg_window: int = 20,
-        scheduler_patience: int = 300,
+        scheduler_patience: int = 500,
         scheduler_threshold: float = 1e-4,
         scheduler_gamma: float = 0.9,
         scheduler_min_lr: float = 1e-6,
@@ -499,16 +480,21 @@ class PINN_CFGS_Solver:
         lambda_min: float = -1.0,
         lambda_max: float = 1.0,
     ) -> None:
-        print("\nTraining CFGS PINN: Delta_GS P = 0  (Urban et al. 2025, sec. 4.1)")
-        print(f"  Domain:          q in [{q_min}, {q_max}], mu in [{mu_min}, {mu_max}]")
-        print(f"  Surface coeffs:  b = {self.b_coeffs}")
+        print(
+            "\nTraining 2DH PINN: ∇^2 u + k^2 u - q(x, y) = 0  "
+            "(Urban et al. 2025, sec. 5)"
+        )
+        print(f"  Domain:          x in [{x_min}, {x_max}], y in [{y_min}, {y_max}]")
+        print(
+            f"  Wavenumbers:     a1={self.a1}, a2={self.a2}, k={self.k:g}"
+        )
         if self.loss_transform == "boxcox":
             print(
                 f"  Loss transform:  {self.loss_transform}  "
                 f"(lambda={self.loss_lambda:g}, eps={self.loss_eps:g})"
             )
         else:
-            print(f"  Loss transform:  {self.loss_transform}  (eps={self.loss_eps:g})")
+            print(f"  Loss transform:  {self.loss_transform}")
         print(
             f"  Optimizers:      Adam ({adam_epochs} iters)"
             f" then {self.quasi_newton.param_groups[0]['variant'].upper()}"
@@ -552,14 +538,14 @@ class PINN_CFGS_Solver:
         n_train = min(max(n_train, 1), n_collocation - 1)
 
         def resample_block():
-            q = torch.empty(n_collocation, 1, device=device).uniform_(q_min, q_max)
-            mu = torch.empty(n_collocation, 1, device=device).uniform_(mu_min, mu_max)
-            qmu = torch.cat([q, mu], dim=1)
+            x = torch.empty(n_collocation, 1, device=device).uniform_(x_min, x_max)
+            y = torch.empty(n_collocation, 1, device=device).uniform_(y_min, y_max)
+            xy = torch.cat([x, y], dim=1)
             perm = torch.randperm(n_collocation, device=device)
-            qmu = qmu[perm]
-            return qmu[:n_train].detach().clone(), qmu[n_train:].detach().clone()
+            xy = xy[perm]
+            return xy[:n_train].detach().clone(), xy[n_train:].detach().clone()
 
-        qmu_train, qmu_val = resample_block()
+        xy_train, xy_val = resample_block()
 
         def make_plateau(opt):
             try:
@@ -600,7 +586,7 @@ class PINN_CFGS_Solver:
                 continue
 
             if epoch != 1 and ((epoch - 1) % resample_every == 0):
-                qmu_train, qmu_val = resample_block()
+                xy_train, xy_val = resample_block()
 
             # ---- Phase A -> Phase B transition (lambda schedule) ----
             if schedule_on and epoch == adam_epochs + 1:
@@ -614,7 +600,7 @@ class PINN_CFGS_Solver:
 
             # ---- Phase B: at every K-block boundary, run the lambda trial scan ----
             in_phase_b = epoch > adam_epochs
-            phase_b_idx = epoch - adam_epochs - 1  # 0-based index within phase B
+            phase_b_idx = epoch - adam_epochs - 1
             at_block_boundary = (
                 schedule_on
                 and in_phase_b
@@ -629,8 +615,8 @@ class PINN_CFGS_Solver:
                 }
                 candidates = sorted(cands_set)
                 trial_log, new_lambda, trail_val = self._phase_b_trial_block(
-                    qmu_train,
-                    qmu_val,
+                    xy_train,
+                    xy_val,
                     K=lambda_block_size,
                     candidates=candidates,
                     diag_grid_n=diag_grid_n,
@@ -674,8 +660,7 @@ class PINN_CFGS_Solver:
                 )
 
                 # The trial covered epochs [epoch, epoch + K - 1] inclusive.
-                # The for-loop body will not run for this iteration; the next
-                # K - 1 iterations are absorbed via skip_remaining.
+                # The next K - 1 main-loop iterations are absorbed via skip_remaining.
                 skip_remaining = lambda_block_size - 1
                 continue
 
@@ -685,7 +670,7 @@ class PINN_CFGS_Solver:
 
             if use_adam:
                 opt.zero_grad()
-                J_obj, J_raw = self.compute_loss(qmu_train, create_graph_second=True)
+                J_obj, J_raw = self.compute_loss(xy_train, create_graph_second=True)
                 J_obj.backward()
                 opt.step()
             else:
@@ -694,7 +679,7 @@ class PINN_CFGS_Solver:
                 def closure():
                     opt.zero_grad()
                     J_obj_c, J_raw_c = self.compute_loss(
-                        qmu_train, create_graph_second=True
+                        xy_train, create_graph_second=True
                     )
                     holder["J_raw"] = J_raw_c
                     J_obj_c.backward()
@@ -702,7 +687,7 @@ class PINN_CFGS_Solver:
 
                 def loss_eval():
                     J_obj_e, _ = self.compute_loss(
-                        qmu_train, create_graph_second=False
+                        xy_train, create_graph_second=False
                     )
                     return J_obj_e
 
@@ -710,9 +695,7 @@ class PINN_CFGS_Solver:
                 J_raw = holder["J_raw"]
 
             with torch.set_grad_enabled(True):
-                val_obj, val_raw = self.compute_loss(
-                    qmu_val, create_graph_second=False
-                )
+                val_obj, val_raw = self.compute_loss(xy_val, create_graph_second=False)
 
             self.obj_train.append(float(J_obj.item()))
             self.obj_val.append(float(val_obj.item()))
@@ -771,73 +754,45 @@ class PINN_CFGS_Solver:
         print("-" * 80)
         print(f"Done. Best val objective moving average: {self.best_val_ma:.6e}")
 
-    # ---- plotting ----
     def plot_results(
         self, n: int = 80, save_path: str | None = None, dpi: int = 150
     ) -> None:
-        qs, mus, QQ, MM, QM = self._grid(n)
-        QMt = torch.from_numpy(QM).to(device)
+        xs, ys, XX, YY, XY = self._grid(n)
+        XYt = torch.from_numpy(XY).to(device)
 
-        u_true = P_exact(QMt).detach().cpu().numpy().reshape(n, n)
+        u_true = u_exact(XYt, self.a1, self.a2).detach().cpu().numpy().reshape(n, n)
         with torch.no_grad():
-            u_pred = self._P_hat(QMt).cpu().numpy().reshape(n, n)
+            u_pred = self._u_hat(XYt).cpu().numpy().reshape(n, n)
         abs_err = np.abs(u_pred - u_true)
-        rel_err = abs_err / (np.abs(u_true) + self.rel_err_eps)
 
-        fig, ax = plt.subplots(2, 3, figsize=(16, 9))
+        fig, axes = plt.subplots(2, 2, figsize=(12, 9))
 
-        im0 = ax[0, 0].imshow(
-            u_true, origin="lower", extent=[q_min, q_max, mu_min, mu_max], aspect="auto"
-        )
-        ax[0, 0].set_title(r"$P_{\mathrm{exact}}(q, \mu)$")
-        plt.colorbar(im0, ax=ax[0, 0], fraction=0.046)
+        im0 = axes[0, 0].contourf(XX, YY, u_true, levels=30, cmap="viridis")
+        fig.colorbar(im0, ax=axes[0, 0])
+        axes[0, 0].set_title(r"$\phi_{\mathrm{exact}}(x, y)$")
 
-        im1 = ax[0, 1].imshow(
-            u_pred, origin="lower", extent=[q_min, q_max, mu_min, mu_max], aspect="auto"
-        )
-        ax[0, 1].set_title(r"$P_{\mathrm{PINN}}(q, \mu)$")
-        plt.colorbar(im1, ax=ax[0, 1], fraction=0.046)
+        im1 = axes[0, 1].contourf(XX, YY, u_pred, levels=30, cmap="viridis")
+        fig.colorbar(im1, ax=axes[0, 1])
+        axes[0, 1].set_title(r"$\phi_{\mathrm{PINN}}(x, y)$")
 
-        im2 = ax[0, 2].imshow(
-            abs_err,
-            origin="lower",
-            extent=[q_min, q_max, mu_min, mu_max],
-            aspect="auto",
-        )
-        ax[0, 2].set_title(r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|$")
-        plt.colorbar(im2, ax=ax[0, 2], fraction=0.046)
+        if self.obj_train:
+            epochs_arr = np.arange(1, len(self.obj_train) + 1)
+            axes[1, 0].semilogy(epochs_arr, self.obj_train, label="obj(train)")
+            axes[1, 0].semilogy(epochs_arr, self.obj_val, label="obj(val)")
+            axes[1, 0].semilogy(epochs_arr, self.J_train, "--", label="J(train)")
+            axes[1, 0].semilogy(epochs_arr, self.J_val, "--", label="J(val)")
+            axes[1, 0].set_xlabel("Epoch")
+            axes[1, 0].set_title("Loss curves")
+            axes[1, 0].grid(True, alpha=0.3)
+            axes[1, 0].legend()
 
-        im3 = ax[1, 0].imshow(
-            rel_err,
-            origin="lower",
-            extent=[q_min, q_max, mu_min, mu_max],
-            aspect="auto",
-        )
-        ax[1, 0].set_title(
-            r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|/(|P_{\mathrm{exact}}| + \varepsilon)$"
-        )
-        plt.colorbar(im3, ax=ax[1, 0], fraction=0.046)
+        im3 = axes[1, 1].contourf(XX, YY, abs_err, levels=30, cmap="magma")
+        fig.colorbar(im3, ax=axes[1, 1])
+        axes[1, 1].set_title(r"$|\phi_{\mathrm{PINN}} - \phi_{\mathrm{exact}}|$")
 
-        ax[1, 1].semilogy(self.obj_train, label="obj(train)")
-        ax[1, 1].semilogy(self.obj_val, label="obj(val)")
-        ax[1, 1].semilogy(self.J_train, "--", label="J(train)")
-        ax[1, 1].semilogy(self.J_val, "--", label="J(val)")
-        ax[1, 1].grid(True, alpha=0.3)
-        ax[1, 1].legend()
-        ax[1, 1].set_title("Objective / loss curves")
-        ax[1, 1].set_xlabel("Epoch")
-
-        ax[1, 2].semilogy(self.pde_l2, label=r"$\|\Delta_{GS} P\|_{L^2}$")
-        ax[1, 2].semilogy(self.sol_l2, label=r"$\|P - P_{\mathrm{exact}}\|_{L^2}$")
-        ax[1, 2].semilogy(self.sol_rel_l2, label="relative $L^2$")
-        ax[1, 2].grid(True, alpha=0.3)
-        ax[1, 2].legend()
-        ax[1, 2].set_title("Errors over epochs")
-        ax[1, 2].set_xlabel("Epoch")
-
-        for i, j in [(0, 0), (0, 1), (0, 2), (1, 0)]:
-            ax[i, j].set_xlabel("q")
-            ax[i, j].set_ylabel(r"$\mu$")
+        for i, j in [(0, 0), (0, 1), (1, 1)]:
+            axes[i, j].set_xlabel("x")
+            axes[i, j].set_ylabel("y")
 
         plt.tight_layout()
         if save_path is not None:
@@ -846,7 +801,7 @@ class PINN_CFGS_Solver:
             print(f"Saved figure to: {save_path}")
         plt.close(fig)
 
-    def save(self, path: str = "../models/pinn_cfgs_ssbroyden.pth") -> None:
+    def save(self, path: str = "../models/pinn_helmholtz.pth") -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save(self.model.state_dict(), path)
         print(f"Saved model to: {path}")
@@ -862,7 +817,7 @@ class PINN_CFGS_Solver:
 
         Writes three files:
             history.npz    — per-epoch arrays (losses, L2 errors, ...)
-            fields.npz     — final P_exact, P_pred, abs_err on the (q, mu) grid
+            fields.npz     — final phi_exact, phi_pred, abs_err on the (x, y) grid
             summary.json   — scalar metrics + hyperparameters
         """
         os.makedirs(run_dir, exist_ok=True)
@@ -880,26 +835,26 @@ class PINN_CFGS_Solver:
         )
         print(f"Saved training history to: {hist_path}")
 
-        qs, mus, QQ, MM, QM = self._grid(n_eval)
-        QMt = torch.from_numpy(QM).to(device)
-        u_true = P_exact(QMt).detach().cpu().numpy().reshape(n_eval, n_eval)
+        xs, ys, XX, YY, XY = self._grid(n_eval)
+        XYt = torch.from_numpy(XY).to(device)
+        u_true = u_exact(XYt, self.a1, self.a2).detach().cpu().numpy().reshape(n_eval, n_eval)
         with torch.no_grad():
-            u_pred = self._P_hat(QMt).cpu().numpy().reshape(n_eval, n_eval)
+            u_pred = self._u_hat(XYt).cpu().numpy().reshape(n_eval, n_eval)
         abs_err = np.abs(u_pred - u_true)
 
         fields_path = os.path.join(run_dir, "fields.npz")
         np.savez(
             fields_path,
-            q=qs.astype(np.float64),
-            mu=mus.astype(np.float64),
-            P_exact=u_true.astype(np.float64),
-            P_pred=u_pred.astype(np.float64),
+            x=xs.astype(np.float64),
+            y=ys.astype(np.float64),
+            phi_exact=u_true.astype(np.float64),
+            phi_pred=u_pred.astype(np.float64),
             abs_err=abs_err.astype(np.float64),
         )
         print(f"Saved field snapshots to: {fields_path}")
 
         summary = {
-            "problem": "CFGS (Urban et al. 2025, sec. 4.1)",
+            "problem": "2DH (Urban et al. 2025, sec. 5)",
             "qn_variant": self.quasi_newton.param_groups[0]["variant"],
             "loss_transform": self.loss_transform,
             "loss_lambda": self.loss_lambda,
@@ -908,10 +863,12 @@ class PINN_CFGS_Solver:
             "lambda_history": [
                 [int(e), float(lam)] for e, lam in self.lambda_history
             ],
-            "b_coeffs": list(self.b_coeffs),
+            "a1_wavenumber": self.a1,
+            "a2_wavenumber": self.a2,
+            "k_wavenumber": self.k,
             "domain": {
-                "q": [q_min, q_max],
-                "mu": [mu_min, mu_max],
+                "x": [x_min, x_max],
+                "y": [y_min, y_max],
             },
             "n_epochs_run": len(self.obj_train),
             "best_val_objective_ma": float(self.best_val_ma),
@@ -939,12 +896,40 @@ class PINN_CFGS_Solver:
 
 
 # =============================================================================
-# MAIN — Urban et al. (2025), Table 1 CFGS hyperparameters
+# MAIN — Urban et al. (2025), Table 4 2DH rows
 # =============================================================================
+# Two configurations from the paper:
+#   "low":  (a1, a2) = (1, 4), k = 1 — 2 layers x 20 neurons, 20 000 iter,
+#                                      5 000 Adam, batch 10 000.
+#   "high": (a1, a2) = (6, 6), k = 1 — 3 layers x 30 neurons, 50 000 iter,
+#                                      5 000 Adam, batch 10 000.
+HELMHOLTZ_CONFIGS: dict[str, dict] = {
+    "low": {
+        "a1": 1,
+        "a2": 4,
+        "k": 1.0,
+        "hidden_layers": (20, 20),
+        "n_epochs": 20000,
+        "adam_epochs": 5000,
+        "n_collocation": 10000,
+    },
+    "high": {
+        "a1": 6,
+        "a2": 6,
+        "k": 1.0,
+        "hidden_layers": (30, 30, 30),
+        "n_epochs": 50000,
+        "adam_epochs": 5000,
+        "n_collocation": 10000,
+    },
+}
+
+
 def main() -> None:
-    # --- user knobs reproducing Table 2 of the paper ---
-    qn_variant = "ssbroyden"     # one of: "bfgs", "ssbfgs", "ssbroyden"
-    loss_transform = "identity"  # one of: "identity", "sqrt", "log", "boxcox"
+    # --- user knobs reproducing the paper's optimizer/loss sweeps ---
+    config_name = "low"          # "low" | "high"
+    qn_variant = "ssbroyden"     # "bfgs", "ssbfgs", "ssbroyden"
+    loss_transform = "identity"  # "identity", "sqrt", "log", "boxcox"
     loss_lambda = 0.5            # only used when loss_transform == "boxcox"
     # Phase A / Phase B lambda schedule (requires loss_transform == "boxcox").
     # When "phase_ab", Phase A trains with lambda=1 (identity) and Phase B
@@ -956,38 +941,38 @@ def main() -> None:
     lambda_step = 0.1
     lambda_min = -1.0
     lambda_max = 1.0
-    qn_H_on_cpu = False          # set True if OOM on GPU
-    # ---------------------------------------------------
+    qn_H_on_cpu = False
+    # ---------------------------------------------------------------
 
-    # Table 1 CFGS: 1 layer, 30 neurons, tanh.
-    model = NeuralNetwork(hidden_layers=(30,), activation=nn.Tanh())
+    cfg = HELMHOLTZ_CONFIGS[config_name]
+
+    model = NeuralNetwork(hidden_layers=cfg["hidden_layers"], activation=nn.Tanh())
     print("\nNeural Network Architecture:\n")
     print(model, "\n")
 
-    pinn = PINN_CFGS_Solver(
+    pinn = PINN_Helmholtz_Solver(
         model=model,
         lr=1e-3,
         lambda_pde=1.0,
+        a1=cfg["a1"],
+        a2=cfg["a2"],
+        k=cfg["k"],
         loss_transform=loss_transform,
         loss_lambda=loss_lambda,
         qn_variant=qn_variant,
         qn_H_on_cpu=qn_H_on_cpu,
-        b_coeffs=B_COEFFS,
     )
 
-    # Table 1 CFGS: 5000 total iterations, 2000 Adam, batch size 1000,
-    # training set refreshed every 500 iterations.
     pinn.train(
-        n_epochs=5000,
-        n_collocation=1000,
+        n_epochs=cfg["n_epochs"],
+        n_collocation=cfg["n_collocation"],
         train_split=0.8,
         resample_every=500,
-        adam_epochs=2000,
-        verbose_freq=200,
+        adam_epochs=cfg["adam_epochs"],
+        verbose_freq=500,
         diag_grid_n=60,
-        patience=5000,       # disable early stop — match paper's fixed budget
+        patience=cfg["n_epochs"],   # disable early stop — match paper's fixed budget
         min_delta=1e-10,
-        moving_avg_window=20,
         loss_lambda_schedule=loss_lambda_schedule,
         lambda_phase_b_init=lambda_phase_b_init,
         lambda_block_size=lambda_block_size,
@@ -1005,12 +990,16 @@ def main() -> None:
             f"boxcox_phaseAB_init{lambda_phase_b_init:g}"
             f"_K{lambda_block_size}_d{lambda_step:g}"
         )
-    run_name = f"cfgs_{qn_variant}_{transform_tag}_{run_tag}"
+    run_name = (
+        f"helmholtz_{config_name}_{qn_variant}_{transform_tag}_{run_tag}"
+    )
     run_dir = os.path.join("..", "results", run_name)
     os.makedirs(run_dir, exist_ok=True)
 
     pinn.plot_results(n=80, save_path=os.path.join(run_dir, "results.png"))
-    pinn.save(f"../models/pinn_cfgs_{qn_variant}_{transform_tag}.pth")
+    pinn.save(
+        f"../models/pinn_helmholtz_{config_name}_{qn_variant}_{transform_tag}.pth"
+    )
     pinn.save_results(
         run_dir,
         n_eval=80,
