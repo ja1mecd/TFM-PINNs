@@ -1,0 +1,310 @@
+"""
+PINN with conditional Adam->QN handover.
+
+The base `PINN_BVP_SSBroyden.train()` switches optimisers at a *fixed* epoch
+(`adam_epochs`). For sweep experiments where Adam plateaus at very different
+epochs across (lambda, seed) pairs, a fixed cutoff either wastes Adam budget
+on already-stalled trajectories or hands a still-improving network over to
+the curvature-aware phase too early. This subclass adds three condition-based
+handover strategies:
+
+    plateau         switch when val J_obj has not improved by min_delta over
+                    the last `plateau_patience` epochs (using the same
+                    moving-average buffer the base class already maintains).
+                    This is the recommended default.
+
+    loss_threshold  switch as soon as J_val drops below `loss_threshold`.
+                    Useful for engaging SSBroyden inside the small-loss
+                    regime where Box-Cox actually amplifies curvature.
+
+    gradnorm        switch when the parameter-gradient L^2 norm drops below
+                    `gradnorm_threshold`, i.e. when Adam is at its first-order
+                    stationarity floor.
+
+    fixed           legacy behaviour: switch at epoch `adam_epochs`.
+
+In every case a safety cap `max_adam_epochs` forces the handover so a flat
+landscape cannot trap Adam forever. Early stopping (the base-class logic
+that monitors the validation MA against `patience`) is orthogonal to the
+handover; it is *enabled by default* in this subclass with `patience=500`,
+and can be disabled by passing `patience=n_epochs`.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from typing import Optional
+
+import numpy as np
+import torch
+import torch.optim as optim
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from pinn_ssbroyden_1d import PINN_BVP_SSBroyden, A, B  # noqa: E402
+
+
+HANDOVER_STRATEGIES: tuple[str, ...] = (
+    "fixed",
+    "plateau",
+    "loss_threshold",
+    "gradnorm",
+)
+
+
+class PINN_BVP_AdaptiveHandover(PINN_BVP_SSBroyden):
+    """Same loss/forward as the base class; replaces the fixed-epoch
+    Adam->QN handover with a condition-based switch."""
+
+    def train(  # type: ignore[override]
+        self,
+        n_epochs: int = 5000,
+        n_collocation: int = 400,
+        train_split: float = 0.8,
+        resample_every: int = 500,
+        adam_epochs: int = 2000,
+        verbose_freq: int = 200,
+        diag_grid_n: int = 400,
+        # Early-stopping (base-class compatible).
+        patience: int = 500,
+        min_delta: float = 1e-10,
+        moving_avg_window: int = 20,
+        # Plateau scheduler for the lr.
+        scheduler_patience: int = 300,
+        scheduler_threshold: float = 1e-4,
+        scheduler_gamma: float = 0.9,
+        scheduler_min_lr: float = 1e-6,
+        # ---- new: handover strategy ----
+        handover_strategy: str = "plateau",
+        handover_max_adam_epochs: int = 10000,
+        plateau_patience: int = 200,
+        plateau_min_delta: float = 1e-4,
+        loss_threshold: float = 1.0,
+        gradnorm_threshold: float = 1e-3,
+    ) -> None:
+        if handover_strategy not in HANDOVER_STRATEGIES:
+            raise ValueError(
+                f"handover_strategy must be one of {HANDOVER_STRATEGIES}, "
+                f"got {handover_strategy!r}"
+            )
+
+        print(
+            "\nTraining 1D PINN (adaptive handover): "
+            f"-u'' = (k pi)^2 sin(k pi x), k = {self.k:g}, "
+            f"domain [{A}, {B}]"
+        )
+        print(f"  Loss transform:    {self.loss_transform} (lambda={self.loss_lambda:g})")
+        print(f"  Handover strategy: {handover_strategy}")
+        if handover_strategy == "fixed":
+            print(f"     adam_epochs = {adam_epochs}")
+        elif handover_strategy == "plateau":
+            print(
+                f"     plateau_patience = {plateau_patience}, "
+                f"plateau_min_delta = {plateau_min_delta}, "
+                f"safety cap = {handover_max_adam_epochs}"
+            )
+        elif handover_strategy == "loss_threshold":
+            print(
+                f"     J_threshold = {loss_threshold}, "
+                f"safety cap = {handover_max_adam_epochs}"
+            )
+        elif handover_strategy == "gradnorm":
+            print(
+                f"     gradnorm_threshold = {gradnorm_threshold}, "
+                f"safety cap = {handover_max_adam_epochs}"
+            )
+        print(f"  Early stopping:    patience = {patience}, min_delta = {min_delta}")
+        print(
+            f"  QN variant:        "
+            f"{self.quasi_newton.param_groups[0]['variant'].upper()}"
+        )
+        print("-" * 72)
+
+        if not (0.0 < train_split < 1.0):
+            raise ValueError("train_split must be in (0, 1).")
+        if n_collocation < 2:
+            raise ValueError("n_collocation must be >= 2.")
+        if resample_every < 1:
+            raise ValueError("resample_every must be >= 1.")
+
+        n_train = int(n_collocation * train_split)
+        n_train = min(max(n_train, 1), n_collocation - 1)
+        device = next(self.model.parameters()).device
+
+        def resample_block():
+            x = torch.empty(n_collocation, 1, device=device).uniform_(A, B)
+            perm = torch.randperm(n_collocation, device=device)
+            x = x[perm]
+            return x[:n_train].detach().clone(), x[n_train:].detach().clone()
+
+        x_train, x_val = resample_block()
+
+        def make_plateau(opt):
+            return optim.lr_scheduler.ReduceLROnPlateau(
+                opt,
+                mode="min",
+                factor=scheduler_gamma,
+                patience=scheduler_patience,
+                threshold=scheduler_threshold,
+                min_lr=scheduler_min_lr,
+            )
+
+        sch_adam = make_plateau(self.adam)
+        sch_qn = make_plateau(self.quasi_newton)
+
+        # Plateau detector for handover (separate from the early-stop
+        # detector below — different patience/min_delta).
+        handover_done = False
+        handover_epoch: Optional[int] = None
+        plateau_best = float("inf")
+        plateau_no_improve = 0
+
+        # Early-stop detector (shared with the base class semantics).
+        ma_buf: list[float] = []
+        epochs_no_improve = 0
+        last_pde = np.nan
+        last_sol = np.nan
+        last_rel = np.nan
+
+        def maybe_handover(epoch: int, val_J_raw: float, grad_norm: Optional[float]) -> bool:
+            """Return True iff the QN phase should engage from this epoch on."""
+            nonlocal plateau_best, plateau_no_improve
+
+            if epoch >= handover_max_adam_epochs:
+                return True
+            if handover_strategy == "fixed":
+                return epoch >= adam_epochs
+            if handover_strategy == "loss_threshold":
+                return val_J_raw < loss_threshold
+            if handover_strategy == "gradnorm":
+                return grad_norm is not None and grad_norm < gradnorm_threshold
+            if handover_strategy == "plateau":
+                if val_J_raw + plateau_min_delta < plateau_best:
+                    plateau_best = val_J_raw
+                    plateau_no_improve = 0
+                else:
+                    plateau_no_improve += 1
+                return plateau_no_improve >= plateau_patience
+            return False
+
+        for epoch in range(1, n_epochs + 1):
+            if epoch != 1 and ((epoch - 1) % resample_every == 0):
+                x_train, x_val = resample_block()
+
+            use_adam = not handover_done
+            opt = self.adam if use_adam else self.quasi_newton
+            sch = sch_adam if use_adam else sch_qn
+
+            grad_norm: Optional[float] = None
+
+            if use_adam:
+                opt.zero_grad()
+                J_obj, J_raw = self.compute_loss(x_train, create_graph_second=True)
+                J_obj.backward()
+                # Capture the gradient norm for the gradnorm-handover trigger.
+                with torch.no_grad():
+                    sq = 0.0
+                    for p in self.model.parameters():
+                        if p.grad is not None:
+                            sq += float((p.grad ** 2).sum().item())
+                    grad_norm = float(sq ** 0.5)
+                opt.step()
+            else:
+                holder: dict = {}
+
+                def closure():
+                    opt.zero_grad()
+                    J_obj_c, J_raw_c = self.compute_loss(
+                        x_train, create_graph_second=True
+                    )
+                    holder["J_raw"] = J_raw_c
+                    J_obj_c.backward()
+                    return J_obj_c
+
+                def loss_eval():
+                    J_obj_e, _ = self.compute_loss(x_train, create_graph_second=False)
+                    return J_obj_e
+
+                J_obj = opt.step(closure, loss_eval)
+                J_raw = holder["J_raw"]
+
+            with torch.set_grad_enabled(True):
+                val_obj, val_raw = self.compute_loss(
+                    x_val, create_graph_second=False
+                )
+
+            self.obj_train.append(float(J_obj.item()))
+            self.obj_val.append(float(val_obj.item()))
+            self.J_train.append(float(J_raw.item()))
+            self.J_val.append(float(val_raw.item()))
+
+            ma_buf.append(float(val_obj.item()))
+            if len(ma_buf) > moving_avg_window:
+                ma_buf.pop(0)
+            val_ma = float(np.mean(ma_buf))
+
+            if val_ma + min_delta < self.best_val_ma:
+                self.best_val_ma = val_ma
+                self.best_state = {
+                    k: v.detach().cpu().clone()
+                    for k, v in self.model.state_dict().items()
+                }
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+
+            sch.step(float(val_obj.item()))
+
+            if epoch == 1 or (epoch % verbose_freq == 0):
+                last_pde = self.compute_pde_l2(n=diag_grid_n)
+                last_sol = self.compute_sol_l2(n=diag_grid_n)
+                last_rel = self.compute_sol_rel_l2(n=diag_grid_n)
+
+            self.pde_l2.append(last_pde)
+            self.sol_l2.append(last_sol)
+            self.sol_rel_l2.append(last_rel)
+
+            if epoch == 1 or (epoch % verbose_freq == 0):
+                lr_now = opt.param_groups[0]["lr"]
+                phase = "ADAM" if use_adam else self.quasi_newton.param_groups[0][
+                    "variant"
+                ].upper()
+                print(
+                    f"Epoch {epoch:6d} [{phase}] | "
+                    f"obj={self.obj_train[-1]:.3e}, val={self.obj_val[-1]:.3e} | "
+                    f"J={self.J_train[-1]:.3e}, valJ={self.J_val[-1]:.3e} | "
+                    f"pdeL2={last_pde:.3e}, solL2={last_sol:.3e}, "
+                    f"relL2={last_rel:.3e} | lr={lr_now:.2e}"
+                )
+
+            # Decide whether to switch optimisers AT THE END of this iteration,
+            # so the next loop iteration begins under the QN regime.
+            if use_adam and not handover_done:
+                if maybe_handover(epoch, float(val_raw.item()), grad_norm):
+                    handover_done = True
+                    handover_epoch = epoch
+                    print(
+                        f"  [handover] epoch {epoch}: switching Adam -> "
+                        f"{self.quasi_newton.param_groups[0]['variant'].upper()} "
+                        f"(strategy={handover_strategy}, J_val={float(val_raw.item()):.3e}, "
+                        f"|grad|={grad_norm if grad_norm is not None else float('nan'):.3e})"
+                    )
+
+            if epochs_no_improve >= patience:
+                print(
+                    f"Early stopping at epoch {epoch} "
+                    f"(no val-MA improvement for {patience} epochs)."
+                )
+                break
+
+        if self.best_state is not None:
+            self.model.load_state_dict(self.best_state)
+        print("-" * 72)
+        print(
+            f"Done. Best val objective MA: {self.best_val_ma:.6e}. "
+            f"Handover @ epoch: {handover_epoch}"
+        )
+        # Surface the handover epoch on the instance for downstream callers.
+        self.handover_epoch = handover_epoch

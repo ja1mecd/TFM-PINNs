@@ -53,6 +53,10 @@ from pinn_ssbroyden_1d import (  # noqa: E402
     NeuralNetwork,
     PINN_BVP_SSBroyden,
 )
+from pinn_adaptive_handover import (  # noqa: E402
+    HANDOVER_STRATEGIES,
+    PINN_BVP_AdaptiveHandover,
+)
 
 
 # =============================================================================
@@ -159,6 +163,13 @@ def run_single(
     lr: float,
     qn_variant: str,
     engage_threshold: Optional[float],
+    handover_strategy: str,
+    handover_max_adam_epochs: int,
+    plateau_patience: int,
+    plateau_min_delta: float,
+    loss_threshold_handover: float,
+    gradnorm_threshold: float,
+    patience: int,
 ) -> SeedResult:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -167,17 +178,8 @@ def run_single(
 
     model = NeuralNetwork(hidden_layers=tuple(hidden), activation=nn.Tanh())
 
-    if engage_threshold is None:
-        pinn = PINN_BVP_SSBroyden(
-            model=model,
-            k=k,
-            lr=lr,
-            loss_transform="boxcox",
-            loss_lambda=lam,
-            qn_variant=qn_variant,
-        )
-        engagement_epoch: Optional[int] = 1
-    else:
+    if engage_threshold is not None:
+        # Delayed Box-Cox engagement: keep the legacy fixed-handover schedule.
         pinn = PINN_BVP_SSBroyden_Schedulable(
             model=model,
             k=k,
@@ -187,25 +189,47 @@ def run_single(
             qn_variant=qn_variant,
             engage_threshold=engage_threshold,
         )
+        pinn.train(
+            n_epochs=n_epochs,
+            n_collocation=n_collocation,
+            train_split=0.8,
+            resample_every=resample_every,
+            adam_epochs=adam_epochs,
+            verbose_freq=max(1, n_epochs // 5),
+            diag_grid_n=400,
+            patience=patience,
+            min_delta=1e-12,
+            moving_avg_window=20,
+        )
         engagement_epoch = pinn.engagement_epoch
-
-    pinn.train(
-        n_epochs=n_epochs,
-        n_collocation=n_collocation,
-        train_split=0.8,
-        resample_every=resample_every,
-        adam_epochs=adam_epochs,
-        verbose_freq=max(1, n_epochs // 5),
-        diag_grid_n=400,
-        patience=n_epochs,
-        min_delta=1e-12,
-        moving_avg_window=20,
-    )
-
-    if engage_threshold is not None and isinstance(
-        pinn, PINN_BVP_SSBroyden_Schedulable
-    ):
-        engagement_epoch = pinn.engagement_epoch
+    else:
+        pinn = PINN_BVP_AdaptiveHandover(
+            model=model,
+            k=k,
+            lr=lr,
+            loss_transform="boxcox",
+            loss_lambda=lam,
+            qn_variant=qn_variant,
+        )
+        pinn.train(
+            n_epochs=n_epochs,
+            n_collocation=n_collocation,
+            train_split=0.8,
+            resample_every=resample_every,
+            adam_epochs=adam_epochs,
+            verbose_freq=max(1, n_epochs // 5),
+            diag_grid_n=400,
+            patience=patience,
+            min_delta=1e-12,
+            moving_avg_window=20,
+            handover_strategy=handover_strategy,
+            handover_max_adam_epochs=handover_max_adam_epochs,
+            plateau_patience=plateau_patience,
+            plateau_min_delta=plateau_min_delta,
+            loss_threshold=loss_threshold_handover,
+            gradnorm_threshold=gradnorm_threshold,
+        )
+        engagement_epoch = getattr(pinn, "handover_epoch", None)
 
     return SeedResult(
         seed=seed,
@@ -234,6 +258,13 @@ def run_sweep(
     lr: float,
     qn_variant: str,
     engage_threshold: Optional[float],
+    handover_strategy: str,
+    handover_max_adam_epochs: int,
+    plateau_patience: int,
+    plateau_min_delta: float,
+    loss_threshold_handover: float,
+    gradnorm_threshold: float,
+    patience: int,
 ) -> tuple[LambdaResult, ...]:
     out: list[LambdaResult] = []
     for lam in lambdas:
@@ -241,7 +272,8 @@ def run_sweep(
         for seed in seeds:
             print(
                 f"\n[lambda={lam:g}, seed={seed}] "
-                f"engage_threshold={engage_threshold}"
+                f"engage_threshold={engage_threshold}, "
+                f"handover={handover_strategy}, patience={patience}"
             )
             res = run_single(
                 lam=lam,
@@ -255,6 +287,13 @@ def run_sweep(
                 lr=lr,
                 qn_variant=qn_variant,
                 engage_threshold=engage_threshold,
+                handover_strategy=handover_strategy,
+                handover_max_adam_epochs=handover_max_adam_epochs,
+                plateau_patience=plateau_patience,
+                plateau_min_delta=plateau_min_delta,
+                loss_threshold_handover=loss_threshold_handover,
+                gradnorm_threshold=gradnorm_threshold,
+                patience=patience,
             )
             seed_results.append(res)
         out.append(LambdaResult(lambda_=lam, seeds=tuple(seed_results)))
@@ -378,7 +417,7 @@ def write_summary(
 # CLI
 # =============================================================================
 DEFAULT_LAMBDAS: tuple[float, ...] = (
-    -0.5, -0.25, 0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0,
+    0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
 )
 DEFAULT_SEEDS: tuple[int, ...] = (42, 43, 44, 45, 46)
 
@@ -424,9 +463,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="ssbroyden",
         choices=["bfgs", "ssbfgs", "ssbroyden"],
     )
-    p.add_argument("--epochs", type=int, default=15000,
-                   help="Total epochs (default 15000 for a meaningful comparison).")
-    p.add_argument("--adam-epochs", type=int, default=5000)
+    p.add_argument("--epochs", type=int, default=5000,
+                   help="Total epochs (matches the thesis 4.2 budget).")
+    p.add_argument("--adam-epochs", type=int, default=2000,
+                   help="Used only when --handover-strategy=fixed.")
+    p.add_argument(
+        "--handover-strategy",
+        type=str,
+        default="plateau",
+        choices=list(HANDOVER_STRATEGIES),
+        help="When Adam hands over to the QN optimiser. plateau (default) "
+             "switches once val J stops improving by --plateau-min-delta over "
+             "the last --plateau-patience epochs, capped at --handover-max-adam-epochs.",
+    )
+    p.add_argument("--handover-max-adam-epochs", type=int, default=10000)
+    p.add_argument("--plateau-patience", type=int, default=200)
+    p.add_argument("--plateau-min-delta", type=float, default=1e-4)
+    p.add_argument("--loss-threshold-handover", type=float, default=1.0,
+                   help="Used only when --handover-strategy=loss_threshold.")
+    p.add_argument("--gradnorm-threshold", type=float, default=1e-3,
+                   help="Used only when --handover-strategy=gradnorm.")
+    p.add_argument(
+        "--patience",
+        type=int,
+        default=None,
+        help="Early-stopping patience on the validation MA. Default: disabled "
+             "(equal to --epochs) so all (lambda, seed) pairs run for the same "
+             "fixed budget. Set to e.g. 500 to enable.",
+    )
     p.add_argument("--n-collocation", type=int, default=400)
     p.add_argument("--resample-every", type=int, default=500)
     p.add_argument("--hidden", type=int, nargs="+", default=[64, 64, 64])
@@ -449,6 +513,7 @@ def main(argv: list[str] | None = None) -> None:
         lambdas = tuple(args.lambdas)
 
     seeds = tuple(args.seeds)
+    patience = args.epochs if args.patience is None else args.patience
 
     run_tag = time.strftime("%Y%m%d_%H%M%S")
     suffix = "_delayed" if args.engage_threshold is not None else ""
@@ -462,9 +527,11 @@ def main(argv: list[str] | None = None) -> None:
         f"\nFine-grained Box-Cox sweep on the 1D BVP "
         f"(k={args.wavenumber:g}, qn={args.qn_variant}, "
         f"epochs={args.epochs}, adam={args.adam_epochs})\n"
-        f"  lambdas: {lambdas}\n"
-        f"  seeds:   {seeds}\n"
-        f"  engage:  {args.engage_threshold}\n"
+        f"  lambdas:           {lambdas}\n"
+        f"  seeds:             {seeds}\n"
+        f"  engage_threshold:  {args.engage_threshold}\n"
+        f"  handover_strategy: {args.handover_strategy}\n"
+        f"  early-stop patience: {patience} (== epochs => disabled)\n"
     )
 
     results = run_sweep(
@@ -479,6 +546,13 @@ def main(argv: list[str] | None = None) -> None:
         lr=args.lr,
         qn_variant=args.qn_variant,
         engage_threshold=args.engage_threshold,
+        handover_strategy=args.handover_strategy,
+        handover_max_adam_epochs=args.handover_max_adam_epochs,
+        plateau_patience=args.plateau_patience,
+        plateau_min_delta=args.plateau_min_delta,
+        loss_threshold_handover=args.loss_threshold_handover,
+        gradnorm_threshold=args.gradnorm_threshold,
+        patience=patience,
     )
 
     write_summary(

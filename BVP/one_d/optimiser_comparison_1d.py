@@ -49,6 +49,10 @@ from pinn_ssbroyden_1d import (  # noqa: E402
     NeuralNetwork,
     PINN_BVP_SSBroyden,
 )
+from pinn_adaptive_handover import (  # noqa: E402
+    HANDOVER_STRATEGIES,
+    PINN_BVP_AdaptiveHandover,
+)
 
 
 PIPELINES: tuple[str, ...] = ("adam", "adam_bfgs", "adam_ssbfgs", "adam_ssbroyden")
@@ -95,6 +99,11 @@ def run_pipeline_once(
     n_collocation: int,
     hidden: tuple[int, ...],
     lr: float,
+    handover_strategy: str,
+    handover_max_adam_epochs: int,
+    plateau_patience: int,
+    plateau_min_delta: float,
+    patience: int,
 ) -> SeedRun:
     if pipeline not in PIPELINES:
         raise ValueError(f"unknown pipeline {pipeline!r}; valid: {PIPELINES}")
@@ -122,7 +131,7 @@ def run_pipeline_once(
             adam_epochs=total_epochs - 1,  # all but one step on Adam
             verbose_freq=max(1, total_epochs // 5),
             diag_grid_n=400,
-            patience=total_epochs,
+            patience=patience,
             min_delta=1e-12,
             moving_avg_window=20,
         )
@@ -132,7 +141,7 @@ def run_pipeline_once(
             "adam_ssbfgs": "ssbfgs",
             "adam_ssbroyden": "ssbroyden",
         }[pipeline]
-        pinn = PINN_BVP_SSBroyden(
+        pinn = PINN_BVP_AdaptiveHandover(
             model=model, k=k, lr=lr,
             loss_transform="identity",
             qn_variant=qn,
@@ -145,9 +154,13 @@ def run_pipeline_once(
             adam_epochs=adam_warmup,
             verbose_freq=max(1, total_epochs // 5),
             diag_grid_n=400,
-            patience=total_epochs,
+            patience=patience,
             min_delta=1e-12,
             moving_avg_window=20,
+            handover_strategy=handover_strategy,
+            handover_max_adam_epochs=handover_max_adam_epochs,
+            plateau_patience=plateau_patience,
+            plateau_min_delta=plateau_min_delta,
         )
 
     return SeedRun(
@@ -173,6 +186,11 @@ def run_comparison(
     n_collocation: int,
     hidden: tuple[int, ...],
     lr: float,
+    handover_strategy: str,
+    handover_max_adam_epochs: int,
+    plateau_patience: int,
+    plateau_min_delta: float,
+    patience: int,
 ) -> tuple[PipelineResult, ...]:
     results: list[PipelineResult] = []
     for p in pipelines:
@@ -188,6 +206,11 @@ def run_comparison(
                 n_collocation=n_collocation,
                 hidden=hidden,
                 lr=lr,
+                handover_strategy=handover_strategy,
+                handover_max_adam_epochs=handover_max_adam_epochs,
+                plateau_patience=plateau_patience,
+                plateau_min_delta=plateau_min_delta,
+                patience=patience,
             )
             runs.append(run)
         results.append(PipelineResult(pipeline=p, seeds=tuple(runs)))
@@ -322,8 +345,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46])
     p.add_argument("--wavenumber", type=float, default=DEFAULT_K)
-    p.add_argument("--total-epochs", type=int, default=10000)
-    p.add_argument("--adam-warmup", type=int, default=2000)
+    p.add_argument("--total-epochs", type=int, default=5000,
+                   help="Matches the thesis 4.2 budget; SSBroyden corrupts H "
+                        "on much longer horizons.")
+    p.add_argument("--adam-warmup", type=int, default=2000,
+                   help="Used only when --handover-strategy=fixed.")
+    p.add_argument(
+        "--handover-strategy",
+        type=str,
+        default="plateau",
+        choices=list(HANDOVER_STRATEGIES),
+    )
+    p.add_argument("--handover-max-adam-epochs", type=int, default=10000)
+    p.add_argument("--plateau-patience", type=int, default=200)
+    p.add_argument("--plateau-min-delta", type=float, default=1e-4)
+    p.add_argument(
+        "--patience",
+        type=int,
+        default=None,
+        help="Early-stopping patience on the validation MA. Default disabled.",
+    )
     p.add_argument("--n-collocation", type=int, default=400)
     p.add_argument("--hidden", type=int, nargs="+", default=[64, 64, 64])
     p.add_argument("--lr", type=float, default=1e-3)
@@ -345,12 +386,15 @@ def main(argv: list[str] | None = None) -> None:
     )
     os.makedirs(out_dir, exist_ok=True)
 
+    patience = args.total_epochs if args.patience is None else args.patience
     print(
         f"\nOptimiser comparison on the 1D BVP "
         f"(k={args.wavenumber:g}, total_epochs={args.total_epochs}, "
         f"adam_warmup={args.adam_warmup}).\n"
-        f"  pipelines: {args.pipelines}\n"
-        f"  seeds:     {args.seeds}\n"
+        f"  pipelines:           {args.pipelines}\n"
+        f"  seeds:               {args.seeds}\n"
+        f"  handover_strategy:   {args.handover_strategy}\n"
+        f"  early-stop patience: {patience} (== total_epochs => disabled)\n"
     )
 
     results = run_comparison(
@@ -362,6 +406,11 @@ def main(argv: list[str] | None = None) -> None:
         n_collocation=args.n_collocation,
         hidden=tuple(args.hidden),
         lr=args.lr,
+        handover_strategy=args.handover_strategy,
+        handover_max_adam_epochs=args.handover_max_adam_epochs,
+        plateau_patience=args.plateau_patience,
+        plateau_min_delta=args.plateau_min_delta,
+        patience=patience,
     )
 
     write_summary(

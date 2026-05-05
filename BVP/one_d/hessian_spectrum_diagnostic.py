@@ -80,28 +80,32 @@ def analyse(N: int, M: int) -> SpectrumResult:
             f"(got M={M}, N={N})."
         )
 
+    # The Gauss-Newton Hessian of J(theta) = (1/2) ||r(theta)||^2 is exactly
+    # J_R^T J_R. With x_i = i / (M+1) and the discrete-sine orthogonality
+    # identity sum_i sin(j pi x_i) sin(k pi x_i) = (M+1)/2 * delta_{j,k},
+    # this matrix is *exactly* diagonal with entries (M+1)/2 * (k pi)^4. The
+    # thesis writes the leading factor as M/2 instead, which is the M -> infty
+    # approximation; both forms are reported below for completeness.
     JR = build_residual_jacobian(N, M)
-    A = JR.T @ JR  # shape (N, N), symmetric PSD
+    A = JR.T @ JR
 
-    # Multiply by M/2 to match the J(theta) = (M/2) * mean_i (...) convention.
-    # The mean produces a 1/M, the squared norm produces J_R^T J_R, and the
-    # outer factor of 2 comes from the 1/2 in the LSQ functional and is
-    # absorbed by the Hessian convention used in chapter 3.
-    A_J = (1.0 / 2.0) * A  # H_J = J_R^T J_R after the (1/M) cancels in mean of N modes
+    eigvals_bare = np.sort(np.linalg.eigvalsh(A))[::-1]
 
-    eigvals_bare = np.sort(np.linalg.eigvalsh(A_J))[::-1]
-
-    diag = np.diag(A_J)
+    diag = np.diag(A)
     if np.any(diag <= 0.0):
         raise RuntimeError("non-positive diagonal entries; Jacobi preconditioner ill-defined")
-    H_jacobi = np.diag(1.0 / diag)
-    A_pre = H_jacobi @ A_J @ H_jacobi  # symmetric: D^{-1} A D^{-1}
+
+    # The Jacobi-preconditioned Hessian is D^{-1/2} A D^{-1/2}, which is
+    # similar to D^{-1} A and therefore shares its eigenvalues. Using
+    # D^{-1} A D^{-1} (the previous version of this script) returns
+    # eigenvalues of D^{-1}, which is *more* spread than A — the opposite
+    # of preconditioning.
+    sqrt_inv = np.diag(1.0 / np.sqrt(diag))
+    A_pre = sqrt_inv @ A @ sqrt_inv
     eigvals_jacobi = np.sort(np.linalg.eigvalsh(0.5 * (A_pre + A_pre.T)))[::-1]
 
-    # Analytic eigenvalues (M/2)(k pi)^4 / 2: the inner factor of 1/2 stems from
-    # taking 1/2 * J_R^T J_R as the Gauss-Newton term used in the thesis.
     k_idx = np.arange(1, N + 1)
-    analytic = (M / 2.0) * (k_idx * np.pi) ** 4 * 0.5
+    analytic = ((M + 1) / 2.0) * (k_idx * np.pi) ** 4
     analytic = np.sort(analytic)[::-1]
 
     cond_bare = float(eigvals_bare[0] / eigvals_bare[-1])
@@ -128,7 +132,7 @@ def plot_spectrum(res: SpectrumResult, out_path: str) -> None:
     ax[0].semilogy(idx, res.eigvals_bare, "o-", color="C0",
                    label=r"empirical $\lambda_k$ of $J_R^\top J_R$", markersize=5)
     ax[0].semilogy(idx, res.analytic, "x", color="C3",
-                   label=r"analytic $(M/2)(k\pi)^4 / 2$", markersize=8)
+                   label=r"analytic $\frac{M+1}{2}(k\pi)^4$", markersize=8)
     ax[0].set_xlabel(r"eigenvalue index $k$")
     ax[0].set_ylabel(r"$\lambda_k$")
     ax[0].set_title(

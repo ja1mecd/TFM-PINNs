@@ -576,6 +576,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
+        "--patience",
+        type=int,
+        default=500,
+        help="Early-stopping patience on the validation MA. Set >= --epochs "
+             "to disable; default 500 is the recommended setting for "
+             "single-shot PDE-solving runs.",
+    )
+    p.add_argument(
+        "--min-delta",
+        type=float,
+        default=1e-10,
+        help="Minimum MA improvement counted as progress for early stopping.",
+    )
+    p.add_argument(
         "--results-dir",
         type=str,
         default=os.path.join("..", "results"),
@@ -614,6 +628,11 @@ def main(argv: list[str] | None = None) -> None:
         qn_variant=args.qn_variant,
     )
 
+    # Single-shot ("PDE problem solving") mode: early stopping ON by default.
+    # The `--patience N` CLI flag (set up in parse_args) controls how many
+    # validation-MA-stagnant epochs are tolerated; the default 500 is much
+    # smaller than --epochs, so a converged run terminates early instead of
+    # burning the full budget. Set `--patience` >= `--epochs` to disable.
     pinn.train(
         n_epochs=args.epochs,
         n_collocation=args.n_collocation,
@@ -622,8 +641,8 @@ def main(argv: list[str] | None = None) -> None:
         adam_epochs=args.adam_epochs,
         verbose_freq=max(1, args.epochs // 25),
         diag_grid_n=400,
-        patience=args.epochs,  # disable early stop by default
-        min_delta=1e-12,
+        patience=args.patience,
+        min_delta=args.min_delta,
         moving_avg_window=20,
     )
 

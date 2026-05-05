@@ -116,8 +116,19 @@ class SSBroydenOptimizer(optim.Optimizer):
         return torch.cat(grads)
 
     @torch.no_grad()
-    def _init_H(self, n: int, ref_tensor: torch.Tensor, H_on_cpu: bool) -> None:
-        if self.H is None or self.H.shape[0] != n:
+    def _init_H(
+        self,
+        n: int,
+        ref_tensor: torch.Tensor,
+        H_on_cpu: bool,
+        force: bool = False,
+    ) -> None:
+        # First-time initialisation OR explicit reset (e.g. from a failed
+        # curvature update with reset_on_fail=True). Without `force`, the
+        # method is a no-op once H has the right shape, and reset_on_fail
+        # silently fails to recover the optimiser — which is what triggers
+        # the runaway J ~ 10^5 plateau on long-horizon runs.
+        if force or self.H is None or self.H.shape[0] != n:
             dev = torch.device("cpu") if H_on_cpu else ref_tensor.device
             self.H = torch.eye(n, device=dev, dtype=ref_tensor.dtype)
 
@@ -166,7 +177,7 @@ class SSBroydenOptimizer(optim.Optimizer):
         if alpha == 0.0 or not np.isfinite(alpha):
             self._set_param_vector(x)
             if reset_on_fail:
-                self._init_H(n, g, H_on_cpu)
+                self._init_H(n, g, H_on_cpu, force=True)
             return loss
 
         s = alpha * p_dir
@@ -180,7 +191,7 @@ class SSBroydenOptimizer(optim.Optimizer):
         ys = torch.dot(y, s)
         if (not torch.isfinite(ys)) or (ys.abs() <= damping):
             if reset_on_fail:
-                self._init_H(n, g_new, H_on_cpu)
+                self._init_H(n, g_new, H_on_cpu, force=True)
             return new_loss
 
         # Cast to the device where H lives (for H_on_cpu mode)
@@ -199,7 +210,7 @@ class SSBroydenOptimizer(optim.Optimizer):
         yHy = torch.dot(yH, Hy)
         if (not torch.isfinite(yHy)) or (yHy.abs() <= damping):
             if reset_on_fail:
-                self._init_H(n, g_new, H_on_cpu)
+                self._init_H(n, g_new, H_on_cpu, force=True)
             return new_loss
 
         # Scaling factor tau_k and weight phi_k — branch by variant
