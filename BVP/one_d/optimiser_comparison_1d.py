@@ -219,25 +219,6 @@ def run_comparison(
 
 
 # =============================================================================
-# Plotting helpers
-# =============================================================================
-def _pad_and_stack(seq: list[np.ndarray]) -> np.ndarray:
-    """Stack possibly variable-length histories into (n, max_len), padding
-    each shorter run with its last value. Lets early-stopped runs coexist
-    with full-budget ones in the same mean / quantile band."""
-    if not seq:
-        return np.empty((0, 0), dtype=np.float64)
-    max_len = max(len(a) for a in seq)
-    out = np.full((len(seq), max_len), np.nan, dtype=np.float64)
-    for i, a in enumerate(seq):
-        if len(a) == 0:
-            continue
-        out[i, : len(a)] = a
-        out[i, len(a):] = a[-1]
-    return out
-
-
-# =============================================================================
 # Plotting
 # =============================================================================
 def plot_comparison(
@@ -247,19 +228,19 @@ def plot_comparison(
 
     for r in results:
         c = PIPELINE_COLOR[r.pipeline]
-        H = _pad_and_stack([s.J_val_history for s in r.seeds])
-        mean = np.nanmean(H, axis=0)
-        lo = np.nanquantile(H, 0.25, axis=0)
-        hi = np.nanquantile(H, 0.75, axis=0)
+        H = np.stack([s.J_val_history for s in r.seeds], axis=0)
+        mean = np.mean(H, axis=0)
+        lo = np.quantile(H, 0.25, axis=0)
+        hi = np.quantile(H, 0.75, axis=0)
         epochs = np.arange(1, mean.size + 1)
         ax[0, 0].semilogy(epochs, mean, color=c, linewidth=1.5,
                           label=PIPELINE_LABEL[r.pipeline])
         ax[0, 0].fill_between(epochs, lo, hi, color=c, alpha=0.15)
 
-        S = _pad_and_stack([s.sol_l2_history for s in r.seeds])
-        smean = np.nanmean(S, axis=0)
-        slo = np.nanquantile(S, 0.25, axis=0)
-        shi = np.nanquantile(S, 0.75, axis=0)
+        S = np.stack([s.sol_l2_history for s in r.seeds], axis=0)
+        smean = np.mean(S, axis=0)
+        slo = np.quantile(S, 0.25, axis=0)
+        shi = np.quantile(S, 0.75, axis=0)
         ax[0, 1].semilogy(epochs, smean, color=c, linewidth=1.5,
                           label=PIPELINE_LABEL[r.pipeline])
         ax[0, 1].fill_between(epochs, slo, shi, color=c, alpha=0.15)
@@ -382,10 +363,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--patience",
         type=int,
-        default=200,
-        help="Early-stopping patience on the validation MA. Default 200 "
-             "(stagnant runs terminate quickly). Set --patience >= "
-             "--total-epochs to disable.",
+        default=None,
+        help="Early-stopping patience on the validation MA. Default disabled.",
     )
     p.add_argument("--n-collocation", type=int, default=400)
     p.add_argument("--hidden", type=int, nargs="+", default=[64, 64, 64])
@@ -408,7 +387,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     os.makedirs(out_dir, exist_ok=True)
 
-    patience = args.patience
+    patience = args.total_epochs if args.patience is None else args.patience
     print(
         f"\nOptimiser comparison on the 1D BVP "
         f"(k={args.wavenumber:g}, total_epochs={args.total_epochs}, "
@@ -416,8 +395,7 @@ def main(argv: list[str] | None = None) -> None:
         f"  pipelines:           {args.pipelines}\n"
         f"  seeds:               {args.seeds}\n"
         f"  handover_strategy:   {args.handover_strategy}\n"
-        f"  early-stop patience: {patience}"
-        f"{' (>= total_epochs => disabled)' if patience >= args.total_epochs else ''}\n"
+        f"  early-stop patience: {patience} (== total_epochs => disabled)\n"
     )
 
     results = run_comparison(
