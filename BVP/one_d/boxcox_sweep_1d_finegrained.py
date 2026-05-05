@@ -149,6 +149,63 @@ class LambdaResult:
 
 
 # =============================================================================
+# Per-(lambda, seed) checkpointing — survives mid-sweep interruptions.
+# =============================================================================
+def _pair_filename(lam: float, seed: int) -> str:
+    """Filesystem-safe checkpoint filename for a single (lambda, seed) pair."""
+    safe_lam = f"{lam:g}".replace(".", "p").replace("-", "m")
+    return f"lam{safe_lam}_seed{seed}.npz"
+
+
+def save_pair(pairs_dir: str, lam: float, result: SeedResult) -> None:
+    """Atomically write the SeedResult for one (lambda, seed) pair so that a
+    later run with the same --resume-dir can skip it. Pass np.savez a file
+    handle (not a path string) to avoid its silent ``.npz`` auto-suffix."""
+    os.makedirs(pairs_dir, exist_ok=True)
+    path = os.path.join(pairs_dir, _pair_filename(lam, result.seed))
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fh:
+        np.savez(
+            fh,
+            lam=np.float64(lam),
+            seed=np.int64(result.seed),
+            final_J_val=np.float64(result.final_J_val),
+            final_pde_l2=np.float64(result.final_pde_l2),
+            final_sol_l2=np.float64(result.final_sol_l2),
+            final_sol_rel_l2=np.float64(result.final_sol_rel_l2),
+            engagement_epoch=np.int64(
+                -1 if result.engagement_epoch is None else result.engagement_epoch
+            ),
+            J_val_history=result.J_val_history,
+            sol_l2_history=result.sol_l2_history,
+        )
+    os.replace(tmp, path)
+
+
+def load_pair(pairs_dir: str, lam: float, seed: int) -> Optional[SeedResult]:
+    """Return a cached SeedResult, or None if the pair has not run yet."""
+    path = os.path.join(pairs_dir, _pair_filename(lam, seed))
+    if not os.path.isfile(path):
+        return None
+    try:
+        with np.load(path) as data:
+            eng = int(data["engagement_epoch"])
+            return SeedResult(
+                seed=int(data["seed"]),
+                final_J_val=float(data["final_J_val"]),
+                final_pde_l2=float(data["final_pde_l2"]),
+                final_sol_l2=float(data["final_sol_l2"]),
+                final_sol_rel_l2=float(data["final_sol_rel_l2"]),
+                engagement_epoch=None if eng < 0 else eng,
+                J_val_history=np.asarray(data["J_val_history"], dtype=np.float64),
+                sol_l2_history=np.asarray(data["sol_l2_history"], dtype=np.float64),
+            )
+    except Exception as exc:  # noqa: BLE001 — corrupt checkpoint, fall back to rerun.
+        print(f"  [warn] failed to load checkpoint {path}: {exc}; rerunning.")
+        return None
+
+
+# =============================================================================
 # Single run
 # =============================================================================
 def run_single(
@@ -265,13 +322,32 @@ def run_sweep(
     loss_threshold_handover: float,
     gradnorm_threshold: float,
     patience: int,
+    pairs_dir: str,
 ) -> tuple[LambdaResult, ...]:
+    """Iterate the (lambda, seed) grid. Each pair is checkpointed under
+    `pairs_dir` immediately on completion, so a later run with the same
+    `--resume-dir` skips already-finished pairs."""
     out: list[LambdaResult] = []
+    n_done = 0
+    n_skipped = 0
+    n_total = len(lambdas) * len(seeds)
     for lam in lambdas:
         seed_results: list[SeedResult] = []
         for seed in seeds:
+            cached = load_pair(pairs_dir, lam, seed)
+            if cached is not None:
+                print(
+                    f"\n[lambda={lam:g}, seed={seed}] "
+                    f"[resume] cached -> skip "
+                    f"(final J_val={cached.final_J_val:.3e}, "
+                    f"solL2={cached.final_sol_l2:.3e})"
+                )
+                seed_results.append(cached)
+                n_skipped += 1
+                continue
             print(
                 f"\n[lambda={lam:g}, seed={seed}] "
+                f"({n_done + n_skipped + 1}/{n_total})  "
                 f"engage_threshold={engage_threshold}, "
                 f"handover={handover_strategy}, patience={patience}"
             )
@@ -295,9 +371,32 @@ def run_sweep(
                 gradnorm_threshold=gradnorm_threshold,
                 patience=patience,
             )
+            save_pair(pairs_dir, lam, res)
             seed_results.append(res)
+            n_done += 1
         out.append(LambdaResult(lambda_=lam, seeds=tuple(seed_results)))
+    print(f"\n[sweep] {n_done} new pair(s) run, {n_skipped} resumed from disk.")
     return tuple(out)
+
+
+# =============================================================================
+# Plotting helpers
+# =============================================================================
+def _pad_and_stack(seq: list[np.ndarray]) -> np.ndarray:
+    """Stack histories of possibly-different lengths into (n, max_len) by
+    holding the last value of each shorter run. Early-stopped trajectories
+    therefore appear as flat lines past their stop epoch in the mean curve,
+    which is the right semantics for "this run converged at this value"."""
+    if not seq:
+        return np.empty((0, 0), dtype=np.float64)
+    max_len = max(len(a) for a in seq)
+    out = np.full((len(seq), max_len), np.nan, dtype=np.float64)
+    for i, a in enumerate(seq):
+        if len(a) == 0:
+            continue
+        out[i, : len(a)] = a
+        out[i, len(a):] = a[-1]
+    return out
 
 
 # =============================================================================
@@ -314,7 +413,7 @@ def plot_sweep(results: tuple[LambdaResult, ...], out_path: str, k: float,
     for i, lr in enumerate(results):
         c = cmap(i / max(n - 1, 1))
         # Pad histories to common length (early stopping is disabled).
-        H = np.stack([s.J_val_history for s in lr.seeds], axis=0)
+        H = _pad_and_stack([s.J_val_history for s in lr.seeds])
         mean = np.mean(H, axis=0)
         ax[0, 0].semilogy(mean, color=c, linewidth=1.3, label=rf"$\lambda={lr.lambda_:g}$")
     ax[0, 0].axvline(adam_epochs, color="k", linestyle=":", alpha=0.5, label="Adam$\\to$SSBroyden")
@@ -327,7 +426,7 @@ def plot_sweep(results: tuple[LambdaResult, ...], out_path: str, k: float,
     # (0,1) Mean solution L2 trajectory per lambda.
     for i, lr in enumerate(results):
         c = cmap(i / max(n - 1, 1))
-        H = np.stack([s.sol_l2_history for s in lr.seeds], axis=0)
+        H = _pad_and_stack([s.sol_l2_history for s in lr.seeds])
         mean = np.mean(H, axis=0)
         ax[0, 1].semilogy(mean, color=c, linewidth=1.3, label=rf"$\lambda={lr.lambda_:g}$")
     ax[0, 1].axvline(adam_epochs, color="k", linestyle=":", alpha=0.5)
@@ -486,10 +585,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--patience",
         type=int,
-        default=None,
-        help="Early-stopping patience on the validation MA. Default: disabled "
-             "(equal to --epochs) so all (lambda, seed) pairs run for the same "
-             "fixed budget. Set to e.g. 500 to enable.",
+        default=200,
+        help="Early-stopping patience on the validation MA. Default 200 "
+             "(stagnant runs terminate ~200 epochs after the loss plateau). "
+             "Set --patience equal to --epochs to disable early stopping "
+             "and force every (lambda, seed) pair to run the full budget.",
     )
     p.add_argument("--n-collocation", type=int, default=400)
     p.add_argument("--resample-every", type=int, default=500)
@@ -499,6 +599,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--results-dir",
         type=str,
         default=os.path.join("..", "results"),
+    )
+    p.add_argument(
+        "--resume-dir",
+        type=str,
+        default=None,
+        help="Reuse this output directory instead of creating a fresh "
+             "timestamped one. Per-(lambda, seed) checkpoints already in this "
+             "directory are loaded; missing pairs are computed and "
+             "checkpointed. Used to resume after a connection drop.",
     )
     return p.parse_args(argv)
 
@@ -513,25 +622,37 @@ def main(argv: list[str] | None = None) -> None:
         lambdas = tuple(args.lambdas)
 
     seeds = tuple(args.seeds)
-    patience = args.epochs if args.patience is None else args.patience
+    patience = args.patience
 
-    run_tag = time.strftime("%Y%m%d_%H%M%S")
-    suffix = "_delayed" if args.engage_threshold is not None else ""
-    sweep_dir = os.path.join(
-        args.results_dir,
-        f"bvp1d_k{args.wavenumber:g}_boxcox_finesweep{suffix}_{args.qn_variant}_{run_tag}",
-    )
-    os.makedirs(sweep_dir, exist_ok=True)
+    if args.resume_dir is not None:
+        sweep_dir = os.path.abspath(args.resume_dir)
+        os.makedirs(sweep_dir, exist_ok=True)
+        mode_msg = f"RESUME mode -> {sweep_dir}"
+    else:
+        run_tag = time.strftime("%Y%m%d_%H%M%S")
+        suffix = "_delayed" if args.engage_threshold is not None else ""
+        sweep_dir = os.path.join(
+            args.results_dir,
+            f"bvp1d_k{args.wavenumber:g}_boxcox_finesweep{suffix}_{args.qn_variant}_{run_tag}",
+        )
+        os.makedirs(sweep_dir, exist_ok=True)
+        mode_msg = f"FRESH sweep -> {sweep_dir}"
+
+    pairs_dir = os.path.join(sweep_dir, "pairs")
+    os.makedirs(pairs_dir, exist_ok=True)
 
     print(
         f"\nFine-grained Box-Cox sweep on the 1D BVP "
         f"(k={args.wavenumber:g}, qn={args.qn_variant}, "
         f"epochs={args.epochs}, adam={args.adam_epochs})\n"
+        f"  {mode_msg}\n"
         f"  lambdas:           {lambdas}\n"
         f"  seeds:             {seeds}\n"
         f"  engage_threshold:  {args.engage_threshold}\n"
         f"  handover_strategy: {args.handover_strategy}\n"
-        f"  early-stop patience: {patience} (== epochs => disabled)\n"
+        f"  early-stop patience: {patience}"
+        f"{' (== epochs => disabled)' if patience >= args.epochs else ''}\n"
+        f"  per-pair checkpoints under: {pairs_dir}\n"
     )
 
     results = run_sweep(
@@ -553,6 +674,7 @@ def main(argv: list[str] | None = None) -> None:
         loss_threshold_handover=args.loss_threshold_handover,
         gradnorm_threshold=args.gradnorm_threshold,
         patience=patience,
+        pairs_dir=pairs_dir,
     )
 
     write_summary(

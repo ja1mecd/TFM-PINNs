@@ -79,6 +79,7 @@ def run_one(
     hidden: tuple[int, ...],
     lr: float,
     qn_variant: str,
+    patience: int = 200,
 ) -> SeedResult:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -100,7 +101,7 @@ def run_one(
         adam_epochs=adam_epochs,
         verbose_freq=max(1, n_epochs // 5),
         diag_grid_n=60,
-        patience=n_epochs,
+        patience=patience,
         min_delta=1e-12,
         moving_avg_window=20,
     )
@@ -126,12 +127,13 @@ def run_sweep(
     hidden: tuple[int, ...],
     lr: float,
     qn_variant: str,
+    patience: int,
 ) -> tuple[LambdaResult, ...]:
     out: list[LambdaResult] = []
     for lam in lambdas:
         seed_runs: list[SeedResult] = []
         for s in seeds:
-            print(f"\n[2DH lambda={lam:g}, seed={s}]")
+            print(f"\n[2DH lambda={lam:g}, seed={s}]  patience={patience}")
             seed_runs.append(run_one(
                 lam=lam, seed=s,
                 a1=a1, a2=a2, k=k,
@@ -139,9 +141,24 @@ def run_sweep(
                 n_collocation=n_collocation,
                 hidden=hidden, lr=lr,
                 qn_variant=qn_variant,
+                patience=patience,
             ))
         out.append(LambdaResult(lambda_=lam, seeds=tuple(seed_runs)))
     return tuple(out)
+
+
+def _pad_and_stack(seq: list[np.ndarray]) -> np.ndarray:
+    """Stack possibly variable-length histories with last-value padding."""
+    if not seq:
+        return np.empty((0, 0), dtype=np.float64)
+    max_len = max(len(a) for a in seq)
+    out = np.full((len(seq), max_len), np.nan, dtype=np.float64)
+    for i, a in enumerate(seq):
+        if len(a) == 0:
+            continue
+        out[i, : len(a)] = a
+        out[i, len(a):] = a[-1]
+    return out
 
 
 def plot_sweep(
@@ -156,12 +173,12 @@ def plot_sweep(
 
     for i, lr in enumerate(results):
         c = cmap(i / max(n - 1, 1))
-        H = np.stack([s.J_val for s in lr.seeds], axis=0)
-        mean = np.mean(H, axis=0)
+        H = _pad_and_stack([s.J_val for s in lr.seeds])
+        mean = np.nanmean(H, axis=0)
         ax[0, 0].semilogy(mean, color=c, linewidth=1.4, label=rf"$\lambda={lr.lambda_:g}$")
 
-        S = np.stack([s.sol_l2 for s in lr.seeds], axis=0)
-        smean = np.mean(S, axis=0)
+        S = _pad_and_stack([s.sol_l2 for s in lr.seeds])
+        smean = np.nanmean(S, axis=0)
         ax[0, 1].semilogy(smean, color=c, linewidth=1.4, label=rf"$\lambda={lr.lambda_:g}$")
 
     ax[0, 0].axvline(adam_epochs, color="k", linestyle=":", alpha=0.5, label="Adam$\\to$SSBroyden")
@@ -277,6 +294,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--n-collocation", type=int, default=10000)
     p.add_argument("--hidden", type=int, nargs="+", default=[20, 20])
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument(
+        "--patience",
+        type=int,
+        default=200,
+        help="Early-stopping patience on the validation MA. Default 200; "
+             "set --patience >= --epochs to disable.",
+    )
     p.add_argument("--results-dir", type=str, default=os.path.join("..", "results"))
     return p.parse_args(argv)
 
@@ -313,6 +337,7 @@ def main(argv: list[str] | None = None) -> None:
         n_collocation=args.n_collocation,
         hidden=tuple(args.hidden), lr=args.lr,
         qn_variant=args.qn_variant,
+        patience=args.patience,
     )
 
     write_summary(
