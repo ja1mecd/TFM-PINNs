@@ -116,8 +116,9 @@ def run_pipeline_once(
     model = NeuralNetwork(hidden_layers=tuple(hidden), activation=nn.Tanh())
 
     if pipeline == "adam":
-        # Pure Adam: set adam_epochs == n_epochs - 1 so the QN phase is empty
-        # but the existing scaffolding still runs without modification.
+        # Pure Adam: adam_epochs == n_epochs so the QN phase is empty.
+        # The base class now accepts adam_epochs in [0, n_epochs] and prints
+        # "[pure Adam]" instead of a phantom "(1 iters)" QN phase.
         pinn = PINN_BVP_SSBroyden(
             model=model, k=k, lr=lr,
             loss_transform="identity",
@@ -128,7 +129,7 @@ def run_pipeline_once(
             n_collocation=n_collocation,
             train_split=0.8,
             resample_every=500,
-            adam_epochs=total_epochs - 1,  # all but one step on Adam
+            adam_epochs=total_epochs,
             verbose_freq=max(1, total_epochs // 5),
             diag_grid_n=400,
             patience=patience,

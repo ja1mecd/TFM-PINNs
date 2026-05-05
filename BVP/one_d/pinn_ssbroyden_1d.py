@@ -261,11 +261,15 @@ class PINN_BVP_SSBroyden:
             )
         else:
             print(f"  Loss transform:  {self.loss_transform}  (eps={self.loss_eps:g})")
-        print(
-            f"  Optimizers:      Adam ({adam_epochs} iters)"
-            f" then {self.quasi_newton.param_groups[0]['variant'].upper()}"
-            f" ({n_epochs - adam_epochs} iters)"
-        )
+        qn_iters = n_epochs - adam_epochs
+        if qn_iters > 0:
+            print(
+                f"  Optimizers:      Adam ({adam_epochs} iters)"
+                f" then {self.quasi_newton.param_groups[0]['variant'].upper()}"
+                f" ({qn_iters} iters)"
+            )
+        else:
+            print(f"  Optimizers:      Adam ({adam_epochs} iters)  [pure Adam]")
         print("-" * 72)
 
         if not (0.0 < train_split < 1.0):
@@ -274,8 +278,8 @@ class PINN_BVP_SSBroyden:
             raise ValueError("n_collocation must be >= 2.")
         if resample_every < 1:
             raise ValueError("resample_every must be >= 1.")
-        if adam_epochs < 0 or adam_epochs >= n_epochs:
-            raise ValueError("adam_epochs must be in [0, n_epochs - 1].")
+        if adam_epochs < 0 or adam_epochs > n_epochs:
+            raise ValueError("adam_epochs must be in [0, n_epochs].")
 
         n_train = int(n_collocation * train_split)
         n_train = min(max(n_train, 1), n_collocation - 1)
