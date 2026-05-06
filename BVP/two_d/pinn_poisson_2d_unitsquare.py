@@ -140,6 +140,14 @@ class PoissonPINN:
         self.sol_l2: list[float] = []
         self.sol_rel_l2: list[float] = []
 
+        # Best-state tracking for early stopping. The optimiser is allowed to
+        # drift around the basin once J is at noise floor; we restore the best
+        # parameters at the end of train() so the reported run is the best one
+        # the optimiser ever saw, not the last one.
+        self.best_state: dict | None = None
+        self.best_val_ma = float("inf")
+        self.early_stop_epoch: int | None = None
+
     def _u_hat(self, xy: torch.Tensor) -> torch.Tensor:
         return hard_ansatz(xy, self.model(xy))
 
@@ -225,7 +233,36 @@ class PoissonPINN:
         resample_every: int = 500,
         verbose_freq: int = 500,
         diag_grid_n: int = 200,
+        # ---- adaptive handover (Adam -> QN) ----
+        # `handover_strategy='plateau'` switches to the quasi-Newton phase the
+        # first time the Adam-phase validation J fails to improve by
+        # `plateau_min_delta` over `plateau_patience` consecutive epochs (or
+        # epoch >= `handover_max_adam_epochs`, whichever comes first). With
+        # `handover_strategy='fixed'` we fall back to the legacy schedule
+        # (switch at exactly `adam_epochs`). The other two strategies match
+        # `pinn_adaptive_handover.py` for parity with the 1D solver.
+        handover_strategy: str = "plateau",
+        handover_max_adam_epochs: int = 10000,
+        plateau_patience: int = 200,
+        plateau_min_delta: float = 1e-4,
+        loss_threshold: float = 1.0,
+        gradnorm_threshold: float = 1e-3,
+        # ---- QN-phase early stopping ----
+        # `patience` is only consulted AFTER handover, so an Adam plateau
+        # cannot terminate the run before the QN method gets a chance to
+        # drive J into the small-loss regime. Set `patience >= n_epochs` to
+        # disable QN-phase early stopping entirely.
+        patience: int = 500,
+        min_delta: float = 1e-12,
+        moving_avg_window: int = 20,
     ) -> None:
+        valid_strategies = ("fixed", "plateau", "loss_threshold", "gradnorm")
+        if handover_strategy not in valid_strategies:
+            raise ValueError(
+                f"handover_strategy must be one of {valid_strategies}, "
+                f"got {handover_strategy!r}"
+            )
+
         n_train = max(1, min(int(n_collocation * train_split), n_collocation - 1))
 
         def resample():
@@ -238,16 +275,34 @@ class PoissonPINN:
 
         x_train, x_val = resample()
 
+        # Adam-phase plateau detector (drives the handover, NOT early stop).
+        plateau_best = float("inf")
+        plateau_no_improve = 0
+        handover_done = False
+        self.handover_epoch: int | None = None
+
+        # QN-phase early-stop detector (only active once handover_done).
+        ma_buf: list[float] = []
+        epochs_no_improve = 0
+
         for epoch in range(1, n_epochs + 1):
             if epoch != 1 and ((epoch - 1) % resample_every == 0):
                 x_train, x_val = resample()
 
-            use_adam = epoch <= adam_epochs
+            use_adam = not handover_done
+            grad_norm: float | None = None
 
             if use_adam:
                 self.adam.zero_grad()
                 J_obj, J_raw = self.compute_loss(x_train, create_graph_second=True)
                 J_obj.backward()
+                if handover_strategy == "gradnorm":
+                    with torch.no_grad():
+                        sq = 0.0
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                sq += float((p.grad ** 2).sum().item())
+                        grad_norm = float(sq ** 0.5)
                 self.adam.step()
             else:
                 holder: dict = {}
@@ -274,6 +329,69 @@ class PoissonPINN:
             self.J_train.append(float(J_raw.item()))
             self.J_val.append(float(val_raw.item()))
 
+            # ---------------------------------------------------------------
+            # Adam phase: only the handover detector runs; we ignore the
+            # MA-based early-stop counter here, otherwise an Adam plateau
+            # could terminate the run before SSBroyden ever engages.
+            # ---------------------------------------------------------------
+            if use_adam:
+                v = float(val_raw.item())
+                if v + plateau_min_delta < plateau_best:
+                    plateau_best = v
+                    plateau_no_improve = 0
+                else:
+                    plateau_no_improve += 1
+
+                handover_now = False
+                if epoch >= handover_max_adam_epochs:
+                    handover_now = True
+                elif handover_strategy == "fixed":
+                    handover_now = epoch >= adam_epochs
+                elif handover_strategy == "plateau":
+                    handover_now = plateau_no_improve >= plateau_patience
+                elif handover_strategy == "loss_threshold":
+                    handover_now = v < loss_threshold
+                elif handover_strategy == "gradnorm":
+                    handover_now = (
+                        grad_norm is not None and grad_norm < gradnorm_threshold
+                    )
+
+                if handover_now:
+                    handover_done = True
+                    self.handover_epoch = epoch
+                    # Reset the early-stop tracker so QN-phase improvement
+                    # over the (much higher) Adam-phase floor counts as new
+                    # progress; otherwise the first QN step would already
+                    # blow past best_val_ma and the counter would never tick.
+                    self.best_val_ma = float("inf")
+                    self.best_state = None
+                    ma_buf = []
+                    epochs_no_improve = 0
+                    print(
+                        f"  [handover] epoch {epoch}: Adam -> QN "
+                        f"(strategy={handover_strategy}, "
+                        f"plateau_no_improve={plateau_no_improve}, "
+                        f"J_val={v:.3e})"
+                    )
+            # ---------------------------------------------------------------
+            # QN phase: track val-MA and early-stop on patience.
+            # ---------------------------------------------------------------
+            else:
+                ma_buf.append(float(val_raw.item()))
+                if len(ma_buf) > moving_avg_window:
+                    ma_buf.pop(0)
+                val_ma = float(np.mean(ma_buf))
+
+                if val_ma + min_delta < self.best_val_ma:
+                    self.best_val_ma = val_ma
+                    self.best_state = {
+                        k: v.detach().cpu().clone()
+                        for k, v in self.model.state_dict().items()
+                    }
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+
             if epoch == 1 or (epoch % verbose_freq == 0):
                 l2_abs, l2_rel = self.compute_sol_l2(n=diag_grid_n)
                 self.sol_l2.append(l2_abs)
@@ -284,14 +402,28 @@ class PoissonPINN:
                     f"J_val={self.J_val[-1]:.3e} | solL2={l2_abs:.3e} | relL2={l2_rel:.3e}"
                 )
             else:
-                # Reuse the most recent dense-grid evaluation to keep histories
-                # the same length as J_train without re-running an expensive eval.
                 if self.sol_l2:
                     self.sol_l2.append(self.sol_l2[-1])
                     self.sol_rel_l2.append(self.sol_rel_l2[-1])
                 else:
                     self.sol_l2.append(float("nan"))
                     self.sol_rel_l2.append(float("nan"))
+
+            # Early stopping fires only AFTER handover.
+            if handover_done and epochs_no_improve >= patience:
+                self.early_stop_epoch = epoch
+                print(
+                    f"Early stopping at epoch {epoch} "
+                    f"(QN-phase val-MA has not improved by {min_delta:g} for "
+                    f"{patience} epochs; best MA = {self.best_val_ma:.3e})."
+                )
+                break
+
+        # Restore best parameters from the QN phase. If handover never
+        # happened (n_epochs too small) we leave the network at its final
+        # Adam state — there's nothing better to roll back to.
+        if self.best_state is not None:
+            self.model.load_state_dict(self.best_state)
 
 
 # =============================================================================
@@ -318,6 +450,13 @@ def run_seeds(
     qn_variant: str,
     loss_transform: str,
     loss_lambda: float,
+    handover_strategy: str,
+    handover_max_adam_epochs: int,
+    plateau_patience: int,
+    plateau_min_delta: float,
+    patience: int,
+    min_delta: float,
+    moving_avg_window: int,
 ) -> tuple[SeedResult, ...]:
     out: list[SeedResult] = []
     for seed in seeds:
@@ -333,13 +472,24 @@ def run_seeds(
             loss_lambda=loss_lambda,
             qn_variant=qn_variant,
         )
-        print(f"\n[seed={seed}] training 2D Poisson PINN")
+        print(
+            f"\n[seed={seed}] training 2D Poisson PINN  "
+            f"(handover={handover_strategy}, plateau_patience={plateau_patience}, "
+            f"qn_patience={patience})"
+        )
         pinn.train(
             n_epochs=n_epochs,
             adam_epochs=adam_epochs,
             n_collocation=n_collocation,
             verbose_freq=max(1, n_epochs // 10),
             diag_grid_n=200,
+            handover_strategy=handover_strategy,
+            handover_max_adam_epochs=handover_max_adam_epochs,
+            plateau_patience=plateau_patience,
+            plateau_min_delta=plateau_min_delta,
+            patience=patience,
+            min_delta=min_delta,
+            moving_avg_window=moving_avg_window,
         )
         XX, YY, t = pinn._eval_grid(150)
         with torch.no_grad():
@@ -457,6 +607,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--hidden", type=int, nargs="+", default=[32, 32, 32])
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
+    p.add_argument(
+        "--handover-strategy",
+        type=str,
+        default="plateau",
+        choices=["fixed", "plateau", "loss_threshold", "gradnorm"],
+        help="When to hand over from Adam to the quasi-Newton optimiser. "
+             "plateau (default): switch as soon as the Adam-phase J fails "
+             "to improve by --plateau-min-delta over --plateau-patience "
+             "epochs. fixed: switch at exactly --adam-epochs (legacy).",
+    )
+    p.add_argument(
+        "--handover-max-adam-epochs",
+        type=int,
+        default=10000,
+        help="Hard cap on Adam-phase length, regardless of strategy.",
+    )
+    p.add_argument("--plateau-patience", type=int, default=200)
+    p.add_argument("--plateau-min-delta", type=float, default=1e-4)
+    p.add_argument(
+        "--patience",
+        type=int,
+        default=500,
+        help="QN-phase early-stop patience. Only counted AFTER handover, "
+             "so an Adam plateau cannot terminate the run before SSBroyden "
+             "has had a chance to engage. Set >= --epochs to disable.",
+    )
+    p.add_argument(
+        "--min-delta",
+        type=float,
+        default=1e-12,
+        help="Absolute MA improvement threshold for early stopping.",
+    )
+    p.add_argument(
+        "--moving-avg-window",
+        type=int,
+        default=20,
+        help="Window length of the val-J moving average used by patience.",
+    )
     p.add_argument("--results-dir", type=str, default=os.path.join("..", "results"))
     return p.parse_args(argv)
 
@@ -481,6 +669,13 @@ def main(argv: list[str] | None = None) -> None:
         qn_variant=args.qn_variant,
         loss_transform=args.loss_transform,
         loss_lambda=args.loss_lambda,
+        handover_strategy=args.handover_strategy,
+        handover_max_adam_epochs=args.handover_max_adam_epochs,
+        plateau_patience=args.plateau_patience,
+        plateau_min_delta=args.plateau_min_delta,
+        patience=args.patience,
+        min_delta=args.min_delta,
+        moving_avg_window=args.moving_avg_window,
     )
 
     plot_results(results, out_path=os.path.join(out_dir, "poisson2d_results.png"))
