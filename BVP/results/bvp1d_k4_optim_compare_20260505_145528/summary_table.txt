@@ -1,0 +1,7 @@
+Optimiser comparison (1D BVP, k=4, total_epochs=5000, adam_warmup=2000, seeds=[42, 43, 44, 45, 46])
+
+            pipeline          mean J           std J        mean solL2       std solL2        mean relL2
+                adam      7.1053e+03      2.1761e+03        1.7448e+00      1.2322e-01        2.4675e+00
+           adam_bfgs      5.0350e+03      5.1122e+03        1.3244e+00      1.9793e+00        1.8730e+00
+         adam_ssbfgs      3.8697e+02      7.7394e+02        1.1012e-01      2.2023e-01        1.5573e-01
+      adam_ssbroyden      7.6453e-04      1.1216e-03        1.0317e-04      1.2982e-04        1.4591e-04
