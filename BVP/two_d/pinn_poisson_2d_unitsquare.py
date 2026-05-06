@@ -153,11 +153,22 @@ class PoissonPINN:
         )[0]
         u_x = grad[:, 0:1]
         u_y = grad[:, 1:2]
+        # The first second-derivative call must keep the first-order graph
+        # alive so the second one (u_yy) can still backprop through it.
+        # Without retain_graph=True this fails as soon as create_graph_second
+        # is False (i.e. on every validation/eval pass).
         u_xx = torch.autograd.grad(
-            u_x, xy, grad_outputs=torch.ones_like(u_x), create_graph=create_graph_second
+            u_x,
+            xy,
+            grad_outputs=torch.ones_like(u_x),
+            create_graph=create_graph_second,
+            retain_graph=True,
         )[0][:, 0:1]
         u_yy = torch.autograd.grad(
-            u_y, xy, grad_outputs=torch.ones_like(u_y), create_graph=create_graph_second
+            u_y,
+            xy,
+            grad_outputs=torch.ones_like(u_y),
+            create_graph=create_graph_second,
         )[0][:, 1:2]
         return (u_xx + u_yy) - f_rhs(xy)
 
