@@ -466,9 +466,26 @@ class PINN_Helmholtz_Solver:
         adam_epochs: int = 10000,
         verbose_freq: int = 500,
         diag_grid_n: int = 60,
-        patience: int = 20000,
+        # Early stopping is now QN-phase-only; an Adam plateau cannot
+        # terminate the run before the curvature-aware optimiser engages.
+        # See pinn_poisson_2d_unitsquare.PoissonPINN.train() for the same
+        # design rationale.
+        patience: int = 500,
         min_delta: float = 1e-10,
         moving_avg_window: int = 20,
+        # Adaptive Adam -> QN handover. With "plateau" the run switches to
+        # the quasi-Newton optimiser the first time the validation J fails
+        # to improve by `plateau_min_delta` over `plateau_patience`
+        # consecutive Adam epochs (or `handover_max_adam_epochs`, whichever
+        # comes first). "fixed" recovers the legacy schedule (switch at
+        # exactly `adam_epochs`); the loss-schedule machinery is only
+        # supported in that mode.
+        handover_strategy: str = "plateau",
+        handover_max_adam_epochs: int = 10000,
+        plateau_patience: int = 200,
+        plateau_min_delta: float = 1e-4,
+        loss_threshold: float = 1.0,
+        gradnorm_threshold: float = 1e-3,
         scheduler_patience: int = 500,
         scheduler_threshold: float = 1e-4,
         scheduler_gamma: float = 0.9,
@@ -495,12 +512,30 @@ class PINN_Helmholtz_Solver:
             )
         else:
             print(f"  Loss transform:  {self.loss_transform}")
-        print(
-            f"  Optimizers:      Adam ({adam_epochs} iters)"
-            f" then {self.quasi_newton.param_groups[0]['variant'].upper()}"
-            f" ({n_epochs - adam_epochs} iters)"
-        )
+        qn_name = self.quasi_newton.param_groups[0]["variant"].upper()
+        if handover_strategy == "fixed":
+            qn_iters = n_epochs - adam_epochs
+            if qn_iters > 0:
+                print(
+                    f"  Optimizers:      Adam ({adam_epochs} iters) then {qn_name} "
+                    f"({qn_iters} iters)  [fixed handover]"
+                )
+            else:
+                print(f"  Optimizers:      Adam ({adam_epochs} iters)  [pure Adam]")
+        else:
+            print(
+                f"  Optimizers:      Adam (handover={handover_strategy}, cap "
+                f"{handover_max_adam_epochs}) -> {qn_name} (until "
+                f"--patience {patience} of stagnation or epoch {n_epochs})"
+            )
         print("-" * 80)
+
+        valid_strategies = ("fixed", "plateau", "loss_threshold", "gradnorm")
+        if handover_strategy not in valid_strategies:
+            raise ValueError(
+                f"handover_strategy must be one of {valid_strategies}, "
+                f"got {handover_strategy!r}"
+            )
 
         if not (0.0 < train_split < 1.0):
             raise ValueError("train_split must be in (0, 1).")
@@ -508,11 +543,19 @@ class PINN_Helmholtz_Solver:
             raise ValueError("n_collocation must be >= 2.")
         if resample_every < 1:
             raise ValueError("resample_every must be >= 1.")
-        if adam_epochs < 0 or adam_epochs >= n_epochs:
-            raise ValueError("adam_epochs must be in [0, n_epochs - 1].")
+        if adam_epochs < 0 or adam_epochs > n_epochs:
+            raise ValueError("adam_epochs must be in [0, n_epochs].")
 
         schedule_on = loss_lambda_schedule == "phase_ab"
         if schedule_on:
+            if handover_strategy != "fixed":
+                # The phase A/B trial-block scan keys off the boundary
+                # `epoch == adam_epochs + 1`; mixing it with adaptive
+                # handover would make that boundary undefined.
+                raise ValueError(
+                    "loss_lambda_schedule='phase_ab' requires "
+                    "handover_strategy='fixed'."
+                )
             if self.loss_transform != "boxcox":
                 raise ValueError(
                     "loss_lambda_schedule='phase_ab' requires loss_transform='boxcox'."
@@ -573,6 +616,15 @@ class PINN_Helmholtz_Solver:
         self.best_val_ma = float("inf")
         ma_buf: list[float] = []
         epochs_no_improve = 0
+
+        # Adam-phase plateau detector for the handover trigger. Tracks the
+        # raw validation J (not the MA — we want handover to fire eagerly)
+        # and is independent from the early-stop counter above, which is
+        # only consulted after handover.
+        plateau_best = float("inf")
+        plateau_no_improve = 0
+        handover_done = False
+        self.handover_epoch: int | None = None
 
         last_pde_l2 = np.nan
         last_sol_l2 = np.nan
@@ -664,14 +716,25 @@ class PINN_Helmholtz_Solver:
                 skip_remaining = lambda_block_size - 1
                 continue
 
-            use_adam = epoch <= adam_epochs
+            # Handover decision: in fixed mode we mimic the legacy
+            # `epoch <= adam_epochs` schedule; in plateau / threshold /
+            # gradnorm modes we keep going on Adam until the trigger fires.
+            use_adam = not handover_done
             opt = self.adam if use_adam else self.quasi_newton
             sch = sch_adam if use_adam else sch_qn
+            grad_norm: float | None = None
 
             if use_adam:
                 opt.zero_grad()
                 J_obj, J_raw = self.compute_loss(xy_train, create_graph_second=True)
                 J_obj.backward()
+                if handover_strategy == "gradnorm":
+                    with torch.no_grad():
+                        sq = 0.0
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                sq += float((p.grad ** 2).sum().item())
+                        grad_norm = float(sq ** 0.5)
                 opt.step()
             else:
                 holder: dict = {}
@@ -702,20 +765,69 @@ class PINN_Helmholtz_Solver:
             self.J_train.append(float(J_raw.item()))
             self.J_val.append(float(val_raw.item()))
 
-            ma_buf.append(float(val_obj.item()))
-            if len(ma_buf) > moving_avg_window:
-                ma_buf.pop(0)
-            val_ma = float(np.mean(ma_buf))
+            # ---------------------------------------------------------------
+            # Adam phase: track plateau on raw val J for the handover
+            # trigger. The early-stop MA counter is intentionally NOT
+            # advanced here; an Adam plateau must hand over, not terminate.
+            # ---------------------------------------------------------------
+            if use_adam:
+                v_raw = float(val_raw.item())
+                if v_raw + plateau_min_delta < plateau_best:
+                    plateau_best = v_raw
+                    plateau_no_improve = 0
+                else:
+                    plateau_no_improve += 1
 
-            if val_ma + min_delta < self.best_val_ma:
-                self.best_val_ma = val_ma
-                self.best_state = {
-                    k: v.detach().cpu().clone()
-                    for k, v in self.model.state_dict().items()
-                }
-                epochs_no_improve = 0
+                handover_now = False
+                if epoch >= handover_max_adam_epochs:
+                    handover_now = True
+                elif handover_strategy == "fixed":
+                    handover_now = epoch >= adam_epochs
+                elif handover_strategy == "plateau":
+                    handover_now = plateau_no_improve >= plateau_patience
+                elif handover_strategy == "loss_threshold":
+                    handover_now = v_raw < loss_threshold
+                elif handover_strategy == "gradnorm":
+                    handover_now = (
+                        grad_norm is not None and grad_norm < gradnorm_threshold
+                    )
+
+                if handover_now:
+                    handover_done = True
+                    self.handover_epoch = epoch
+                    # Reset best-state and MA so QN-phase improvement over
+                    # the (much higher) Adam-phase floor counts as new
+                    # progress; otherwise the first QN step blows past
+                    # best_val_ma and the counter never ticks.
+                    self.best_val_ma = float("inf")
+                    self.best_state = None
+                    ma_buf = []
+                    epochs_no_improve = 0
+                    print(
+                        f"  [handover] epoch {epoch}: Adam -> "
+                        f"{self.quasi_newton.param_groups[0]['variant'].upper()} "
+                        f"(strategy={handover_strategy}, "
+                        f"plateau_no_improve={plateau_no_improve}, "
+                        f"val_J={v_raw:.3e})"
+                    )
+            # ---------------------------------------------------------------
+            # QN phase: MA-based early stopping.
+            # ---------------------------------------------------------------
             else:
-                epochs_no_improve += 1
+                ma_buf.append(float(val_obj.item()))
+                if len(ma_buf) > moving_avg_window:
+                    ma_buf.pop(0)
+                val_ma = float(np.mean(ma_buf))
+
+                if val_ma + min_delta < self.best_val_ma:
+                    self.best_val_ma = val_ma
+                    self.best_state = {
+                        k: v.detach().cpu().clone()
+                        for k, v in self.model.state_dict().items()
+                    }
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
 
             sch.step(float(val_obj.item()))
 
@@ -741,10 +853,12 @@ class PINN_Helmholtz_Solver:
                     f"relSolL2={last_sol_rel_l2:.3e} | lr={lr_now:.2e}"
                 )
 
-            if epochs_no_improve >= patience:
+            # Early stop only fires AFTER handover, so a stalled Adam phase
+            # cannot terminate the run before SSBroyden engages.
+            if handover_done and epochs_no_improve >= patience:
                 print(
                     f"Early stopping at epoch {epoch} "
-                    f"(no val-MA improvement for {patience} epochs)."
+                    f"(QN-phase val-MA has not improved for {patience} epochs)."
                 )
                 break
 

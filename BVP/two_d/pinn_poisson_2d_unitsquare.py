@@ -508,6 +508,22 @@ def run_seeds(
     return tuple(out)
 
 
+def _pad_and_stack(seq: list[np.ndarray]) -> np.ndarray:
+    """Stack possibly variable-length histories into (n, max_len), padding
+    each shorter run with its last value. Handles the variable-length
+    seeds that early stopping produces."""
+    if not seq:
+        return np.empty((0, 0), dtype=np.float64)
+    max_len = max(len(a) for a in seq)
+    out = np.full((len(seq), max_len), np.nan, dtype=np.float64)
+    for i, a in enumerate(seq):
+        if len(a) == 0:
+            continue
+        out[i, : len(a)] = a
+        out[i, len(a):] = a[-1]
+    return out
+
+
 def plot_results(
     results: tuple[SeedResult, ...],
     out_path: str,
@@ -539,8 +555,8 @@ def plot_results(
 
     for r in results:
         ax[1, 1].semilogy(r.J_val, alpha=0.4, label=f"seed {r.seed}")
-    H = np.stack([r.J_val for r in results], axis=0)
-    ax[1, 1].semilogy(np.mean(H, axis=0), color="k", linewidth=1.6, label="mean")
+    H = _pad_and_stack([r.J_val for r in results])
+    ax[1, 1].semilogy(np.nanmean(H, axis=0), color="k", linewidth=1.6, label="mean")
     ax[1, 1].set_xlabel("Epoch")
     ax[1, 1].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$")
     ax[1, 1].set_title("Validation residual MSE")
