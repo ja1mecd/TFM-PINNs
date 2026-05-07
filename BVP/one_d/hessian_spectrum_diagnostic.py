@@ -142,8 +142,8 @@ def plot_spectrum(res: SpectrumResult, out_path: str) -> None:
     ax[0].grid(True, which="both", alpha=0.3)
     ax[0].legend(fontsize=9)
 
-    ax[1].semilogy(idx, res.eigvals_jacobi, "s-", color="C2", markersize=5,
-                   label=r"$\lambda_k$ after diag-Jacobi preconditioner")
+    ax[1].plot(idx, res.eigvals_jacobi, "s-", color="C2", markersize=5,
+               label=r"$\lambda_k$ after diag-Jacobi preconditioner")
     ax[1].axhline(1.0, color="k", linestyle=":", alpha=0.5, label=r"$\lambda \equiv 1$")
     ax[1].set_xlabel(r"eigenvalue index $k$")
     ax[1].set_ylabel(r"$\lambda_k$ (preconditioned)")
@@ -151,8 +151,22 @@ def plot_spectrum(res: SpectrumResult, out_path: str) -> None:
         f"Preconditioned spectrum  "
         rf"$\kappa = {res.cond_jacobi:.3e}$"
     )
+    # With all eigenvalues equal to 1 to machine precision, autoscaling
+    # collapses the y-axis to a hairsbreadth around 1 and produces no
+    # readable ticks. Linear scale with a zoomed window centred on 1
+    # makes the flat trace and its tick labels legible while still
+    # showing that any perceivable variation would be obvious.
+    ax[1].set_ylim(0.95, 1.05)
+    max_dev = float(np.max(np.abs(res.eigvals_jacobi - 1.0)))
+    ax[1].text(
+        0.05, 0.05,
+        rf"$\max_k |\lambda_k - 1| = {max_dev:.1e}$",
+        transform=ax[1].transAxes,
+        fontsize=9,
+        bbox=dict(facecolor="white", edgecolor="0.7", boxstyle="round,pad=0.3"),
+    )
     ax[1].grid(True, which="both", alpha=0.3)
-    ax[1].legend(fontsize=9)
+    ax[1].legend(fontsize=9, loc="upper right")
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
