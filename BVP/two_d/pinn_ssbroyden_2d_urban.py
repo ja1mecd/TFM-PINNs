@@ -208,8 +208,8 @@ class PINN_CFGS_Solver_Urban:
             .numpy()
             .reshape(n, n)
         )
-        intMu = np.trapezoid(res**2, mus, axis=0)
-        return float(np.sqrt(np.trapezoid(intMu, qs, axis=0)))
+        intMu = np.trapz(res**2, mus, axis=0)
+        return float(np.sqrt(np.trapz(intMu, qs, axis=0)))
 
     def compute_sol_l2(self, n: int = 60) -> float:
         qs, mus, _, _, QM = self._grid(n)
@@ -218,8 +218,8 @@ class PINN_CFGS_Solver_Urban:
         with torch.no_grad():
             u_pred = self._P_hat(QMt).cpu().numpy().reshape(n, n)
         diff = u_pred - u_true
-        intMu = np.trapezoid(diff**2, mus, axis=0)
-        return float(np.sqrt(np.trapezoid(intMu, qs, axis=0)))
+        intMu = np.trapz(diff**2, mus, axis=0)
+        return float(np.sqrt(np.trapz(intMu, qs, axis=0)))
 
     def compute_sol_rel_l2(self, n: int = 60) -> float:
         qs, mus, _, _, QM = self._grid(n)
@@ -228,8 +228,8 @@ class PINN_CFGS_Solver_Urban:
         with torch.no_grad():
             u_pred = self._P_hat(QMt).cpu().numpy().reshape(n, n)
         diff = u_pred - u_true
-        num = np.trapezoid(np.trapezoid(diff**2, mus, axis=0), qs, axis=0)
-        den = np.trapezoid(np.trapezoid(u_true**2, mus, axis=0), qs, axis=0)
+        num = np.trapz(np.trapz(diff**2, mus, axis=0), qs, axis=0)
+        den = np.trapz(np.trapz(u_true**2, mus, axis=0), qs, axis=0)
         return float(np.sqrt(num) / (np.sqrt(den) + self.rel_err_eps))
 
     # ----- residual-adaptive sampling on the (q, mu) rectangle -----
