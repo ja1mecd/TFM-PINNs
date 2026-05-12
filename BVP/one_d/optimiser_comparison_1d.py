@@ -69,6 +69,22 @@ PIPELINE_COLOR: dict[str, str] = {
     "adam_ssbroyden": "C0",
 }
 
+# A run is treated as "successful" iff its final relative L^2 solution error
+# is strictly below this threshold. Choosing 1.0 puts the cutoff at the trivial
+# constant-zero predictor (||u_exact||_{L^2} = sqrt(1/2) on [0,1], so a network
+# that fails to train and collapses to zero saturates at rel.L^2 ~= 1).
+# Anything above the threshold did not learn the target and is excluded from
+# means, IQR bands, and bar heights to avoid contaminating the comparison
+# with seeds that never escaped the Adam plateau.
+SUCCESS_REL_L2_DEFAULT: float = 1.0
+
+
+def is_successful(run: "SeedRun", rel_l2_threshold: float) -> bool:
+    """True iff the final iterate beats the configured rel. L^2 threshold."""
+    return bool(np.isfinite(run.final_sol_rel_l2)) and (
+        run.final_sol_rel_l2 < rel_l2_threshold
+    )
+
 
 @dataclass(frozen=True)
 class SeedRun:
@@ -221,75 +237,171 @@ def run_comparison(
 # =============================================================================
 # Plotting
 # =============================================================================
+def _partition_runs(
+    r: PipelineResult, rel_l2_threshold: float
+) -> tuple[tuple[SeedRun, ...], tuple[SeedRun, ...]]:
+    """Split a pipeline's seeds into (successful, failed) tuples."""
+    succ = tuple(s for s in r.seeds if is_successful(s, rel_l2_threshold))
+    fail = tuple(s for s in r.seeds if not is_successful(s, rel_l2_threshold))
+    return succ, fail
+
+
 def plot_comparison(
-    results: tuple[PipelineResult, ...], out_path: str, k: float, adam_warmup: int
+    results: tuple[PipelineResult, ...],
+    out_path: str,
+    k: float,
+    adam_warmup: int,
+    rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
 ) -> None:
+    """Compose the four-panel figure using only successful seeds.
+
+    Failed seeds (final rel.L^2 >= ``rel_l2_threshold``) are excluded from
+    every aggregate statistic. Pipelines for which every seed failed are
+    annotated as such in the legend and in the bar panels but contribute no
+    line or bar height, so the comparison only reflects runs that actually
+    trained.
+    """
     fig, ax = plt.subplots(2, 2, figsize=(14, 10))
+
+    success_counts: dict[str, tuple[int, int]] = {}
 
     for r in results:
         c = PIPELINE_COLOR[r.pipeline]
-        H = np.stack([s.J_val_history for s in r.seeds], axis=0)
+        succ, _ = _partition_runs(r, rel_l2_threshold)
+        n_succ, n_total = len(succ), len(r.seeds)
+        success_counts[r.pipeline] = (n_succ, n_total)
+        succ_tag = f" [{n_succ}/{n_total} succ.]"
+
+        if n_succ == 0:
+            # Reserve a legend entry so the colour mapping stays stable, but
+            # plot no line — the pipeline has no successful run to average.
+            ax[0, 0].plot(
+                [], [], color=c, linewidth=1.5,
+                label=PIPELINE_LABEL[r.pipeline] + succ_tag,
+            )
+            ax[0, 1].plot(
+                [], [], color=c, linewidth=1.5,
+                label=PIPELINE_LABEL[r.pipeline] + succ_tag,
+            )
+            continue
+
+        H = np.stack([s.J_val_history for s in succ], axis=0)
         mean = np.mean(H, axis=0)
         lo = np.quantile(H, 0.25, axis=0)
         hi = np.quantile(H, 0.75, axis=0)
         epochs = np.arange(1, mean.size + 1)
-        ax[0, 0].semilogy(epochs, mean, color=c, linewidth=1.5,
-                          label=PIPELINE_LABEL[r.pipeline])
+        ax[0, 0].semilogy(
+            epochs, mean, color=c, linewidth=1.5,
+            label=PIPELINE_LABEL[r.pipeline] + succ_tag,
+        )
         ax[0, 0].fill_between(epochs, lo, hi, color=c, alpha=0.15)
 
-        S = np.stack([s.sol_l2_history for s in r.seeds], axis=0)
+        S = np.stack([s.sol_l2_history for s in succ], axis=0)
         smean = np.mean(S, axis=0)
         slo = np.quantile(S, 0.25, axis=0)
         shi = np.quantile(S, 0.75, axis=0)
-        ax[0, 1].semilogy(epochs, smean, color=c, linewidth=1.5,
-                          label=PIPELINE_LABEL[r.pipeline])
+        ax[0, 1].semilogy(
+            epochs, smean, color=c, linewidth=1.5,
+            label=PIPELINE_LABEL[r.pipeline] + succ_tag,
+        )
         ax[0, 1].fill_between(epochs, slo, shi, color=c, alpha=0.15)
 
     ax[0, 0].axvline(adam_warmup, color="k", linestyle=":", alpha=0.5, label="warm-up boundary")
     ax[0, 0].set_xlabel("Epoch")
     ax[0, 0].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$ (mean, IQR shaded)")
-    ax[0, 0].set_title(f"Validation residual MSE (k={k:g})")
+    ax[0, 0].set_title(
+        f"Validation residual MSE (k={k:g}); successful seeds only "
+        f"(rel.$L^2<{rel_l2_threshold:g}$)"
+    )
     ax[0, 0].grid(True, alpha=0.3)
     ax[0, 0].legend(fontsize=9)
 
     ax[0, 1].axvline(adam_warmup, color="k", linestyle=":", alpha=0.5)
     ax[0, 1].set_xlabel("Epoch")
     ax[0, 1].set_ylabel(r"$\|\widehat{u} - u^\star\|_{L^2}$ (mean, IQR shaded)")
-    ax[0, 1].set_title("Solution L^2 error")
+    ax[0, 1].set_title(
+        f"Solution $L^2$ error; successful seeds only "
+        f"(rel.$L^2<{rel_l2_threshold:g}$)"
+    )
     ax[0, 1].grid(True, alpha=0.3)
     ax[0, 1].legend(fontsize=9)
 
-    # Bar plot of final residual.
+    # Bar plots: aggregate over successful seeds only.
     pipeline_names = [r.pipeline for r in results]
-    means_J = [float(np.mean([s.final_J_val for s in r.seeds])) for r in results]
-    stds_J = [float(np.std([s.final_J_val for s in r.seeds])) for r in results]
-    means_sol = [float(np.mean([s.final_sol_l2 for s in r.seeds])) for r in results]
-    stds_sol = [float(np.std([s.final_sol_l2 for s in r.seeds])) for r in results]
+
+    def _success_stats(
+        r: PipelineResult, attr: str
+    ) -> tuple[float, float, bool]:
+        succ, _ = _partition_runs(r, rel_l2_threshold)
+        if not succ:
+            return 0.0, 0.0, False
+        vals = [getattr(s, attr) for s in succ]
+        return float(np.mean(vals)), float(np.std(vals)), True
+
+    means_J, stds_J, has_J = zip(
+        *(_success_stats(r, "final_J_val") for r in results)
+    )
+    means_sol, stds_sol, has_sol = zip(
+        *(_success_stats(r, "final_sol_l2") for r in results)
+    )
 
     x = np.arange(len(pipeline_names))
     cols = [PIPELINE_COLOR[p] for p in pipeline_names]
 
+    def _annotate_failures(
+        axis: plt.Axes, has_data: tuple[bool, ...], heights: tuple[float, ...]
+    ) -> None:
+        """Mark pipelines with no successful runs above the (zero-height) bar."""
+        finite_heights = [h for h, ok in zip(heights, has_data) if ok and h > 0]
+        baseline = min(finite_heights) if finite_heights else 1e-12
+        for xi, (ok, name) in enumerate(zip(has_data, pipeline_names)):
+            if ok:
+                continue
+            n_succ, n_total = success_counts[name]
+            axis.text(
+                xi, baseline * 0.5,
+                f"{n_succ}/{n_total}\nsucceeded",
+                ha="center", va="top", fontsize=8, color="dimgray",
+            )
+
     ax[1, 0].bar(x, means_J, yerr=stds_J, color=cols, alpha=0.85, capsize=4)
     ax[1, 0].set_yscale("log")
     ax[1, 0].set_xticks(x)
-    ax[1, 0].set_xticklabels([PIPELINE_LABEL[p] for p in pipeline_names], rotation=20, ha="right")
+    ax[1, 0].set_xticklabels(
+        [PIPELINE_LABEL[p] for p in pipeline_names], rotation=20, ha="right",
+    )
     ax[1, 0].set_ylabel(r"final $\mathcal{J}_{\mathrm{val}}$")
-    ax[1, 0].set_title("Final residual (mean $\\pm$ std across seeds)")
+    ax[1, 0].set_title(
+        "Final residual over successful seeds (mean $\\pm$ std)"
+    )
     ax[1, 0].grid(True, alpha=0.3, axis="y")
+    _annotate_failures(ax[1, 0], has_J, means_J)
 
     ax[1, 1].bar(x, means_sol, yerr=stds_sol, color=cols, alpha=0.85, capsize=4)
     ax[1, 1].set_yscale("log")
     ax[1, 1].set_xticks(x)
-    ax[1, 1].set_xticklabels([PIPELINE_LABEL[p] for p in pipeline_names], rotation=20, ha="right")
+    ax[1, 1].set_xticklabels(
+        [PIPELINE_LABEL[p] for p in pipeline_names], rotation=20, ha="right",
+    )
     ax[1, 1].set_ylabel(r"final $\|u-u^*\|_{L^2}$")
-    ax[1, 1].set_title("Final solution error (mean $\\pm$ std across seeds)")
+    ax[1, 1].set_title(
+        "Final solution error over successful seeds (mean $\\pm$ std)"
+    )
     ax[1, 1].grid(True, alpha=0.3, axis="y")
+    _annotate_failures(ax[1, 1], has_sol, means_sol)
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved comparison figure to: {out_path}")
+
+
+def _format_stat(values: list[float]) -> tuple[str, str]:
+    """Return ``(mean, std)`` formatted strings, or ``("n/a", "n/a")`` when empty."""
+    if not values:
+        return "n/a", "n/a"
+    return f"{float(np.mean(values)):.4e}", f"{float(np.std(values)):.4e}"
 
 
 def write_summary(
@@ -299,30 +411,55 @@ def write_summary(
     total_epochs: int,
     adam_warmup: int,
     seeds: tuple[int, ...],
+    rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
 ) -> None:
+    """Write a two-section summary: success counts + conditional stats over
+    successful seeds, then the per-seed final metrics so failed runs remain
+    auditable in the artefact."""
     lines: list[str] = []
     lines.append(
         f"Optimiser comparison (1D BVP, k={k:g}, total_epochs={total_epochs}, "
-        f"adam_warmup={adam_warmup}, seeds={list(seeds)})\n\n"
+        f"adam_warmup={adam_warmup}, seeds={list(seeds)})\n"
     )
     lines.append(
-        f"{'pipeline':>20}  "
+        f"Success criterion: final relative L^2 error < {rel_l2_threshold:g}.\n\n"
+    )
+
+    lines.append("== Aggregate statistics over successful seeds ==\n")
+    lines.append(
+        f"{'pipeline':>20}  {'n_succ':>8}  "
         f"{'mean J':>14}  {'std J':>14}    "
         f"{'mean solL2':>14}  {'std solL2':>14}    "
         f"{'mean relL2':>14}\n"
     )
     for r in results:
-        mJ = float(np.mean([s.final_J_val for s in r.seeds]))
-        sJ = float(np.std([s.final_J_val for s in r.seeds]))
-        mS = float(np.mean([s.final_sol_l2 for s in r.seeds]))
-        sS = float(np.std([s.final_sol_l2 for s in r.seeds]))
-        mR = float(np.mean([s.final_sol_rel_l2 for s in r.seeds]))
+        succ = [s for s in r.seeds if is_successful(s, rel_l2_threshold)]
+        n_succ = len(succ)
+        n_total = len(r.seeds)
+        mJ, sJ = _format_stat([s.final_J_val for s in succ])
+        mS, sS = _format_stat([s.final_sol_l2 for s in succ])
+        mR, _ = _format_stat([s.final_sol_rel_l2 for s in succ])
         lines.append(
-            f"{r.pipeline:>20}  "
-            f"{mJ:>14.4e}  {sJ:>14.4e}    "
-            f"{mS:>14.4e}  {sS:>14.4e}    "
-            f"{mR:>14.4e}\n"
+            f"{r.pipeline:>20}  {n_succ:>3d}/{n_total:<3d}  "
+            f"{mJ:>14}  {sJ:>14}    "
+            f"{mS:>14}  {sS:>14}    "
+            f"{mR:>14}\n"
         )
+
+    lines.append("\n== Per-seed final metrics (all runs, including failures) ==\n")
+    lines.append(
+        f"{'pipeline':>20}  {'seed':>6}  "
+        f"{'final J':>14}  {'final solL2':>14}  {'final relL2':>14}  status\n"
+    )
+    for r in results:
+        for s in r.seeds:
+            status = "ok" if is_successful(s, rel_l2_threshold) else "FAIL"
+            lines.append(
+                f"{r.pipeline:>20}  {s.seed:>6d}  "
+                f"{s.final_J_val:>14.4e}  {s.final_sol_l2:>14.4e}  "
+                f"{s.final_sol_rel_l2:>14.4e}  {status}\n"
+            )
+
     text = "".join(lines)
     with open(out_path, "w") as fh:
         fh.write(text)
@@ -374,6 +511,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=os.path.join("..", "results"),
     )
+    p.add_argument(
+        "--success-rel-l2-threshold",
+        type=float,
+        default=SUCCESS_REL_L2_DEFAULT,
+        help=(
+            "Final relative L^2 error below which a seed is considered "
+            "successful. Default 1.0 (= the trivial zero predictor); "
+            "tighten if you only want clearly trained runs."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -421,12 +568,14 @@ def main(argv: list[str] | None = None) -> None:
         total_epochs=args.total_epochs,
         adam_warmup=args.adam_warmup,
         seeds=tuple(args.seeds),
+        rel_l2_threshold=args.success_rel_l2_threshold,
     )
     plot_comparison(
         results=results,
         out_path=os.path.join(out_dir, "optimiser_comparison.png"),
         k=args.wavenumber,
         adam_warmup=args.adam_warmup,
+        rel_l2_threshold=args.success_rel_l2_threshold,
     )
 
     np.savez(
