@@ -161,7 +161,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--adam-epochs", type=int, default=2000)
     p.add_argument("--n-collocation", type=int, default=400)
     p.add_argument("--resample-every", type=int, default=500)
-    p.add_argument("--hidden", type=int, nargs="+", default=[64, 64, 64])
+    p.add_argument(
+        "--hidden",
+        type=int,
+        nargs="+",
+        default=[32, 32, 32],
+        help=(
+            "Hidden-layer widths. Default 3x32 matches the architecture "
+            "used by optimiser_comparison_1d.py and documented in section "
+            "4.2 of the thesis."
+        ),
+    )
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(

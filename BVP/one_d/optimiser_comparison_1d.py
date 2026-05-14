@@ -332,9 +332,16 @@ def plot_comparison(
     def _success_stats(
         r: PipelineResult, attr: str
     ) -> tuple[float, float, bool]:
+        """Mean and std over successful seeds.
+
+        Returns ``(nan, nan, False)`` for pipelines without a single
+        successful run. NaN, not 0.0: a zero-height bar on a log axis
+        is -inf and pushes the y-limits to nonsense (10^-278 etc.).
+        ``ax.bar`` skips NaN heights cleanly.
+        """
         succ, _ = _partition_runs(r, rel_l2_threshold)
         if not succ:
-            return 0.0, 0.0, False
+            return float("nan"), float("nan"), False
         vals = [getattr(s, attr) for s in succ]
         return float(np.mean(vals)), float(np.std(vals)), True
 
@@ -348,23 +355,65 @@ def plot_comparison(
     x = np.arange(len(pipeline_names))
     cols = [PIPELINE_COLOR[p] for p in pipeline_names]
 
+    def _log_safe_yerr(
+        means: tuple[float, ...], stds: tuple[float, ...]
+    ) -> np.ndarray:
+        """Convert symmetric ``mean +- std`` into asymmetric whiskers that
+        never reach <=0 on a log axis.
+
+        On a log y-axis, ``yerr=std`` is symmetric *in linear units*, so
+        whenever ``std > mean`` the lower whisker is non-positive and
+        matplotlib silently clips it to a tiny value, which then drives
+        the axis auto-limits to absurd numbers (10^-278). Capping the
+        lower whisker at ``0.95 * mean`` keeps it strictly positive while
+        still showing the seedwise spread when std < mean.
+        """
+        m = np.asarray(means, dtype=float)
+        s = np.asarray(stds, dtype=float)
+        lo = np.where(np.isfinite(m), np.minimum(s, 0.95 * np.abs(m)), 0.0)
+        hi = np.where(np.isfinite(m), s, 0.0)
+        return np.vstack([lo, hi])
+
     def _annotate_failures(
-        axis: plt.Axes, has_data: tuple[bool, ...], heights: tuple[float, ...]
+        axis: plt.Axes, has_data: tuple[bool, ...]
     ) -> None:
-        """Mark pipelines with no successful runs above the (zero-height) bar."""
-        finite_heights = [h for h, ok in zip(heights, has_data) if ok and h > 0]
-        baseline = min(finite_heights) if finite_heights else 1e-12
+        """Mark pipelines with no successful runs at the axis bottom."""
+        y_lo, _ = axis.get_ylim()
         for xi, (ok, name) in enumerate(zip(has_data, pipeline_names)):
             if ok:
                 continue
             n_succ, n_total = success_counts[name]
             axis.text(
-                xi, baseline * 0.5,
+                xi, y_lo * 3,  # just above the floor on log scale
                 f"{n_succ}/{n_total}\nsucceeded",
-                ha="center", va="top", fontsize=8, color="dimgray",
+                ha="center", va="bottom", fontsize=8, color="dimgray",
             )
 
-    ax[1, 0].bar(x, means_J, yerr=stds_J, color=cols, alpha=0.85, capsize=4)
+    def _set_log_ylim(
+        axis: plt.Axes, means: tuple[float, ...], stds: tuple[float, ...]
+    ) -> None:
+        """Pin the log y-axis to a sensible band: half a decade below the
+        smallest finite (mean - std) and one decade above the largest
+        (mean + std). Prevents the auto-limit blow-up that produced the
+        10^-278 ticks."""
+        m = np.asarray(means, dtype=float)
+        s = np.asarray(stds, dtype=float)
+        mask = np.isfinite(m)
+        if not mask.any():
+            return
+        lo_candidates = np.maximum(m[mask] - np.minimum(s[mask], 0.95 * m[mask]),
+                                   m[mask] * 0.05)
+        hi_candidates = m[mask] + s[mask]
+        lo = float(np.min(lo_candidates))
+        hi = float(np.max(hi_candidates))
+        if lo <= 0 or not np.isfinite(lo) or not np.isfinite(hi):
+            return
+        axis.set_ylim(lo / np.sqrt(10.0), hi * np.sqrt(10.0))
+
+    ax[1, 0].bar(
+        x, means_J, yerr=_log_safe_yerr(means_J, stds_J),
+        color=cols, alpha=0.85, capsize=4,
+    )
     ax[1, 0].set_yscale("log")
     ax[1, 0].set_xticks(x)
     ax[1, 0].set_xticklabels(
@@ -375,9 +424,13 @@ def plot_comparison(
         "Final residual over successful seeds (mean $\\pm$ std)"
     )
     ax[1, 0].grid(True, alpha=0.3, axis="y")
-    _annotate_failures(ax[1, 0], has_J, means_J)
+    _set_log_ylim(ax[1, 0], means_J, stds_J)
+    _annotate_failures(ax[1, 0], has_J)
 
-    ax[1, 1].bar(x, means_sol, yerr=stds_sol, color=cols, alpha=0.85, capsize=4)
+    ax[1, 1].bar(
+        x, means_sol, yerr=_log_safe_yerr(means_sol, stds_sol),
+        color=cols, alpha=0.85, capsize=4,
+    )
     ax[1, 1].set_yscale("log")
     ax[1, 1].set_xticks(x)
     ax[1, 1].set_xticklabels(
@@ -388,7 +441,8 @@ def plot_comparison(
         "Final solution error over successful seeds (mean $\\pm$ std)"
     )
     ax[1, 1].grid(True, alpha=0.3, axis="y")
-    _annotate_failures(ax[1, 1], has_sol, means_sol)
+    _set_log_ylim(ax[1, 1], means_sol, stds_sol)
+    _annotate_failures(ax[1, 1], has_sol)
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -504,7 +558,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Early-stopping patience on the validation MA. Default disabled.",
     )
     p.add_argument("--n-collocation", type=int, default=400)
-    p.add_argument("--hidden", type=int, nargs="+", default=[64, 64, 64])
+    p.add_argument(
+        "--hidden",
+        type=int,
+        nargs="+",
+        default=[32, 32, 32],
+        help=(
+            "Hidden-layer widths. Default 3x32 matches the architecture "
+            "documented in section 4.2 of the thesis; the wider 3x64 net "
+            "(2.5x parameters) reaches the same final accuracy but does "
+            "not change the optimiser ranking."
+        ),
+    )
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument(
         "--results-dir",
