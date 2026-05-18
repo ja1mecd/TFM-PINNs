@@ -1,0 +1,32 @@
+Optimiser comparison (1D BVP, k=4, total_epochs=5000, adam_warmup=2000, seeds=[42, 43, 44, 45, 46])
+Success criterion: final relative L^2 error < 1.
+
+== Aggregate statistics over successful seeds ==
+            pipeline    n_succ          mean J           std J        mean solL2       std solL2        mean relL2
+                adam    0/5               n/a             n/a               n/a             n/a               n/a
+           adam_bfgs    2/5        4.6797e-04      4.5917e-04        1.3956e-04      1.1370e-04        1.9737e-04
+         adam_ssbfgs    4/5        4.7920e-04      8.2591e-04        2.4941e-04      4.2359e-04        3.5272e-04
+      adam_ssbroyden    4/5        2.3399e-04      3.9534e-04        4.5434e-05      5.8434e-05        6.4253e-05
+
+== Per-seed final metrics (all runs, including failures) ==
+            pipeline    seed         final J     final solL2     final relL2  status
+                adam      42      8.6158e+03      1.9969e+00      2.8240e+00  FAIL
+                adam      43      5.6920e+03      1.9530e+00      2.7620e+00  FAIL
+                adam      44      6.4068e+03      1.7425e+00      2.4642e+00  FAIL
+                adam      45      5.6097e+03      1.8032e+00      2.5501e+00  FAIL
+                adam      46      6.2543e+03      1.5500e+00      2.1920e+00  FAIL
+           adam_bfgs      42      1.3477e+04      7.1363e-01      1.0092e+00  FAIL
+           adam_bfgs      43      8.8082e-06      2.5864e-05      3.6578e-05  ok
+           adam_bfgs      44      3.8338e+03      3.7012e+00      5.2343e+00  FAIL
+           adam_bfgs      45      1.0892e+04      7.2681e-01      1.0279e+00  FAIL
+           adam_bfgs      46      9.2714e-04      2.5326e-04      3.5817e-04  ok
+         adam_ssbfgs      42      4.9732e-06      7.7960e-06      1.1025e-05  ok
+         adam_ssbfgs      43      8.2376e-07      5.2656e-06      7.4468e-06  ok
+         adam_ssbfgs      44      1.2867e-06      1.4824e-06      2.0964e-06  ok
+         adam_ssbfgs      45      3.4902e+03      1.2059e+00      1.7053e+00  FAIL
+         adam_ssbfgs      46      1.9097e-03      9.8308e-04      1.3903e-03  ok
+      adam_ssbroyden      42      5.1406e-06      2.0373e-05      2.8812e-05  ok
+      adam_ssbroyden      43      3.1835e+03      9.6671e-01      1.3671e+00  FAIL
+      adam_ssbroyden      44      1.8021e-06      1.1609e-05      1.6418e-05  ok
+      adam_ssbroyden      45      1.0287e-05      3.6288e-06      5.1319e-06  ok
+      adam_ssbroyden      46      9.1871e-04      1.4612e-04      2.0665e-04  ok
