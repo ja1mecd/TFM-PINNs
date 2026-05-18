@@ -126,6 +126,24 @@ class SeedResult:
     sol_l2_history: np.ndarray
 
 
+# A seed counts as successful iff its final relative L^2 error sits below
+# this threshold. 1.0 puts the cut-off at the trivial zero predictor; with
+# u_exact = sin(4 pi x) on [0,1] that's at ||u_exact||_{L^2} = sqrt(1/2),
+# so a seed that fails to escape the Adam plateau saturates near rel.L^2 ~= 1.
+# All conditional statistics in plot_sweep / write_summary are taken over the
+# success subset to avoid having the unconditional mean dominated by 1-2 seeds
+# that never enter the small-loss regime (which silently wipes out the
+# lambda dependence on networks that are near the edge of trainability).
+SUCCESS_REL_L2_DEFAULT: float = 1.0
+
+
+def is_successful(s: "SeedResult", rel_l2_threshold: float) -> bool:
+    """True iff the final iterate beats the configured rel. L^2 threshold."""
+    return bool(np.isfinite(s.final_sol_rel_l2)) and (
+        s.final_sol_rel_l2 < rel_l2_threshold
+    )
+
+
 @dataclass(frozen=True)
 class LambdaResult:
     lambda_: float
@@ -146,6 +164,24 @@ class LambdaResult:
     @property
     def final_sol_l2_std(self) -> float:
         return float(np.std([s.final_sol_l2 for s in self.seeds]))
+
+    def successful(self, rel_l2_threshold: float) -> tuple[SeedResult, ...]:
+        return tuple(s for s in self.seeds if is_successful(s, rel_l2_threshold))
+
+    def cond_stats(
+        self, attr: str, rel_l2_threshold: float
+    ) -> tuple[int, float, float]:
+        """Return (n_success, mean, std) over the successful seeds.
+
+        If no seed succeeded, returns (0, NaN, NaN). NaN-not-zero is what
+        keeps matplotlib's log axes from auto-extending to absurd negative
+        decades when a lambda has no successful run.
+        """
+        succ = self.successful(rel_l2_threshold)
+        if not succ:
+            return 0, float("nan"), float("nan")
+        vals = [getattr(s, attr) for s in succ]
+        return len(succ), float(np.mean(vals)), float(np.std(vals))
 
 
 # =============================================================================
@@ -303,49 +339,126 @@ def run_sweep(
 # =============================================================================
 # Plotting
 # =============================================================================
-def plot_sweep(results: tuple[LambdaResult, ...], out_path: str, k: float,
-               adam_epochs: int, engage_threshold: Optional[float]) -> None:
+def _log_safe_yerr(
+    means: np.ndarray, stds: np.ndarray
+) -> np.ndarray:
+    """Convert symmetric ``mean +- std`` into asymmetric whiskers that never
+    reach <=0 on a log axis. Returns a 2xN array suitable for ``yerr=``.
+
+    When std > mean, the lower whisker would otherwise be non-positive;
+    matplotlib silently clips it to a tiny value and the axis auto-limits
+    blow up. Capping the lower whisker at 0.95*mean keeps it strictly
+    positive while still showing the seedwise spread when std < mean.
+    NaN cells (lambda with zero successful seeds) get yerr=0; the
+    accompanying NaN ``means`` value makes matplotlib skip drawing.
+    """
+    m = np.asarray(means, dtype=float)
+    s = np.asarray(stds, dtype=float)
+    lo = np.where(np.isfinite(m), np.minimum(s, 0.95 * np.abs(m)), 0.0)
+    hi = np.where(np.isfinite(m), s, 0.0)
+    return np.vstack([lo, hi])
+
+
+def plot_sweep(
+    results: tuple[LambdaResult, ...],
+    out_path: str,
+    k: float,
+    adam_epochs: int,
+    engage_threshold: Optional[float],
+    rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
+) -> None:
+    """Compose the four-panel sweep figure using only successful seeds.
+
+    Failed seeds (final rel.L^2 >= ``rel_l2_threshold``) are excluded from
+    every aggregate statistic; lambdas with zero successful seeds get a
+    "0/N succeeded" annotation in the bar panels and no trajectory in the
+    line panels.
+    """
     fig, ax = plt.subplots(2, 2, figsize=(15, 10))
 
     cmap = plt.get_cmap("viridis")
     n = len(results)
+    success_counts: list[tuple[int, int]] = []
 
-    # (0,0) Mean J(val) trajectory per lambda (averaged across seeds).
+    # (0,0) and (0,1) -- mean trajectories per lambda, conditional on success.
     for i, lr in enumerate(results):
         c = cmap(i / max(n - 1, 1))
-        # Pad histories to common length (early stopping is disabled).
-        H = np.stack([s.J_val_history for s in lr.seeds], axis=0)
-        mean = np.mean(H, axis=0)
-        ax[0, 0].semilogy(mean, color=c, linewidth=1.3, label=rf"$\lambda={lr.lambda_:g}$")
-    ax[0, 0].axvline(adam_epochs, color="k", linestyle=":", alpha=0.5, label="Adam$\\to$SSBroyden")
+        succ = lr.successful(rel_l2_threshold)
+        n_succ, n_total = len(succ), len(lr.seeds)
+        success_counts.append((n_succ, n_total))
+        succ_tag = f" [{n_succ}/{n_total}]"
+        if n_succ == 0:
+            # Reserve the legend slot but draw nothing.
+            ax[0, 0].plot([], [], color=c, linewidth=1.3,
+                          label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
+            ax[0, 1].plot([], [], color=c, linewidth=1.3,
+                          label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
+            continue
+        H = np.stack([s.J_val_history for s in succ], axis=0)
+        ax[0, 0].semilogy(np.mean(H, axis=0), color=c, linewidth=1.3,
+                          label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
+        S = np.stack([s.sol_l2_history for s in succ], axis=0)
+        ax[0, 1].semilogy(np.mean(S, axis=0), color=c, linewidth=1.3,
+                          label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
+
+    ax[0, 0].axvline(adam_epochs, color="k", linestyle=":", alpha=0.5,
+                     label="Adam$\\to$SSBroyden")
     ax[0, 0].set_xlabel("Epoch")
-    ax[0, 0].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$ (mean over seeds)")
-    ax[0, 0].set_title("Validation residual MSE")
+    ax[0, 0].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$ (mean over successful seeds)")
+    ax[0, 0].set_title(
+        f"Validation residual MSE; successful seeds only "
+        f"(rel.$L^2<{rel_l2_threshold:g}$)"
+    )
     ax[0, 0].grid(True, alpha=0.3)
     ax[0, 0].legend(fontsize=8, ncol=2)
 
-    # (0,1) Mean solution L2 trajectory per lambda.
-    for i, lr in enumerate(results):
-        c = cmap(i / max(n - 1, 1))
-        H = np.stack([s.sol_l2_history for s in lr.seeds], axis=0)
-        mean = np.mean(H, axis=0)
-        ax[0, 1].semilogy(mean, color=c, linewidth=1.3, label=rf"$\lambda={lr.lambda_:g}$")
     ax[0, 1].axvline(adam_epochs, color="k", linestyle=":", alpha=0.5)
     ax[0, 1].set_xlabel("Epoch")
     ax[0, 1].set_ylabel(r"$\|\widehat{u} - u^\star\|_{L^2}$")
-    ax[0, 1].set_title("Solution L2 error")
+    ax[0, 1].set_title(
+        f"Solution $L^2$ error; successful seeds only "
+        f"(rel.$L^2<{rel_l2_threshold:g}$)"
+    )
     ax[0, 1].grid(True, alpha=0.3)
     ax[0, 1].legend(fontsize=8, ncol=2)
 
-    # (1,0) Final J(val) mean +/- std as bar / errorbar plot.
+    # (1,0) and (1,1) -- final values per lambda, conditional on success.
     lams = np.asarray([r.lambda_ for r in results])
-    means_J = np.asarray([r.final_J_val_mean for r in results])
-    stds_J = np.asarray([r.final_J_val_std for r in results])
-    means_sol = np.asarray([r.final_sol_l2_mean for r in results])
-    stds_sol = np.asarray([r.final_sol_l2_std for r in results])
+    cond = [r.cond_stats("final_J_val", rel_l2_threshold) for r in results]
+    means_J = np.asarray([m for _, m, _ in cond], dtype=float)
+    stds_J = np.asarray([s for _, _, s in cond], dtype=float)
+    cond_s = [r.cond_stats("final_sol_l2", rel_l2_threshold) for r in results]
+    means_sol = np.asarray([m for _, m, _ in cond_s], dtype=float)
+    stds_sol = np.asarray([s for _, _, s in cond_s], dtype=float)
 
-    ax[1, 0].errorbar(lams, means_J, yerr=stds_J, fmt="o-", color="C3",
-                      label=r"final $\mathcal{J}_{\mathrm{val}}$ mean $\pm$ std")
+    def _set_log_ylim(
+        axis: plt.Axes, means: np.ndarray, stds: np.ndarray
+    ) -> None:
+        m = np.asarray(means, dtype=float)
+        s = np.asarray(stds, dtype=float)
+        mask = np.isfinite(m)
+        if not mask.any():
+            return
+        lo_cand = np.maximum(m[mask] - np.minimum(s[mask], 0.95 * m[mask]),
+                             m[mask] * 0.05)
+        hi_cand = m[mask] + s[mask]
+        lo, hi = float(np.min(lo_cand)), float(np.max(hi_cand))
+        if lo <= 0 or not np.isfinite(lo) or not np.isfinite(hi):
+            return
+        axis.set_ylim(lo / np.sqrt(10.0), hi * np.sqrt(10.0))
+
+    def _annotate_empty(axis: plt.Axes, means: np.ndarray) -> None:
+        y_lo, _ = axis.get_ylim()
+        for lam_val, m, (n_succ, n_total) in zip(lams, means, success_counts):
+            if np.isfinite(m):
+                continue
+            axis.text(lam_val, y_lo * 3,
+                      f"{n_succ}/{n_total}",
+                      ha="center", va="bottom", fontsize=8, color="dimgray")
+
+    ax[1, 0].errorbar(lams, means_J, yerr=_log_safe_yerr(means_J, stds_J),
+                      fmt="o-", color="C3", capsize=3,
+                      label=r"final $\mathcal{J}_{\mathrm{val}}$ mean $\pm$ std (successful seeds)")
     ax[1, 0].set_yscale("log")
     ax[1, 0].set_xlabel(r"Box-Cox $\lambda$")
     ax[1, 0].set_ylabel(r"final $\mathcal{J}_{\mathrm{val}}$")
@@ -356,21 +469,33 @@ def plot_sweep(results: tuple[LambdaResult, ...], out_path: str, k: float,
         title += f", delayed engagement at J<{engage_threshold:g}"
     title += ")"
     ax[1, 0].set_title(title)
+    _set_log_ylim(ax[1, 0], means_J, stds_J)
+    _annotate_empty(ax[1, 0], means_J)
 
-    ax[1, 1].errorbar(lams, means_sol, yerr=stds_sol, fmt="s-", color="C0",
-                      label=r"final $\|u-u^*\|_{L^2}$ mean $\pm$ std")
+    ax[1, 1].errorbar(lams, means_sol, yerr=_log_safe_yerr(means_sol, stds_sol),
+                      fmt="s-", color="C0", capsize=3,
+                      label=r"final $\|u-u^*\|_{L^2}$ mean $\pm$ std (successful seeds)")
     ax[1, 1].set_yscale("log")
     ax[1, 1].set_xlabel(r"Box-Cox $\lambda$")
     ax[1, 1].set_ylabel(r"final solution $L^2$ error")
     ax[1, 1].grid(True, alpha=0.3)
     ax[1, 1].legend(fontsize=9)
-    ax[1, 1].set_title("Solution error vs lambda")
+    ax[1, 1].set_title("Solution error vs lambda (successful seeds)")
+    _set_log_ylim(ax[1, 1], means_sol, stds_sol)
+    _annotate_empty(ax[1, 1], means_sol)
 
     plt.tight_layout()
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     print(f"Saved sweep figure to: {out_path}")
     plt.close(fig)
+
+
+def _fmt_stat(values: list[float]) -> tuple[str, str]:
+    """Return ``(mean, std)`` as strings, or ``("n/a", "n/a")`` when empty."""
+    if not values:
+        return "n/a", "n/a"
+    return f"{float(np.mean(values)):.4e}", f"{float(np.std(values)):.4e}"
 
 
 def write_summary(
@@ -382,30 +507,60 @@ def write_summary(
     adam_epochs: int,
     engage_threshold: Optional[float],
     seeds: tuple[int, ...],
+    rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
 ) -> None:
+    """Write a two-section summary: success counts + conditional aggregates,
+    then per-seed final metrics with ok/FAIL flags so failed runs stay
+    auditable in the artefact."""
     lines: list[str] = []
     lines.append(
         f"Fine-grained Box-Cox sweep (1D BVP, k={k:g}, qn={qn_variant}, "
         f"epochs={n_epochs}, adam={adam_epochs}, seeds={list(seeds)})\n"
     )
     if engage_threshold is not None:
-        lines.append(f"Delayed engagement: transformation engages once J < {engage_threshold:g}.\n")
-    lines.append("\n")
+        lines.append(
+            f"Delayed engagement: transformation engages once J < "
+            f"{engage_threshold:g}.\n"
+        )
     lines.append(
-        f"{'lambda':>8}   "
-        f"{'mean J':>16}  {'std J':>14}    "
-        f"{'mean solL2':>16}  {'std solL2':>14}    "
-        f"{'engaged':>10}\n"
+        f"Success criterion: final relative L^2 error < {rel_l2_threshold:g}.\n\n"
+    )
+
+    lines.append("== Aggregate statistics over successful seeds ==\n")
+    lines.append(
+        f"{'lambda':>8}  {'n_succ':>8}  "
+        f"{'mean J':>14}  {'std J':>14}    "
+        f"{'mean solL2':>14}  {'std solL2':>14}    "
+        f"{'engaged':>16}\n"
     )
     for lr in results:
-        eng = [s.engagement_epoch for s in lr.seeds if s.engagement_epoch is not None]
+        succ = lr.successful(rel_l2_threshold)
+        n_succ, n_total = len(succ), len(lr.seeds)
+        mJ, sJ = _fmt_stat([s.final_J_val for s in succ])
+        mS, sS = _fmt_stat([s.final_sol_l2 for s in succ])
+        eng = [s.engagement_epoch for s in succ if s.engagement_epoch is not None]
         eng_str = f"epoch~{int(np.mean(eng))}" if eng else "never/from-start"
         lines.append(
-            f"{lr.lambda_:>8.4g}   "
-            f"{lr.final_J_val_mean:>16.4e}  {lr.final_J_val_std:>14.4e}    "
-            f"{lr.final_sol_l2_mean:>16.4e}  {lr.final_sol_l2_std:>14.4e}    "
-            f"{eng_str:>10}\n"
+            f"{lr.lambda_:>8.4g}  {n_succ:>3d}/{n_total:<3d}  "
+            f"{mJ:>14}  {sJ:>14}    "
+            f"{mS:>14}  {sS:>14}    "
+            f"{eng_str:>16}\n"
         )
+
+    lines.append("\n== Per-seed final metrics (all runs, including failures) ==\n")
+    lines.append(
+        f"{'lambda':>8}  {'seed':>6}  "
+        f"{'final J':>14}  {'final solL2':>14}  {'final relL2':>14}  status\n"
+    )
+    for lr in results:
+        for s in lr.seeds:
+            status = "ok" if is_successful(s, rel_l2_threshold) else "FAIL"
+            lines.append(
+                f"{lr.lambda_:>8.4g}  {s.seed:>6d}  "
+                f"{s.final_J_val:>14.4e}  {s.final_sol_l2:>14.4e}  "
+                f"{s.final_sol_rel_l2:>14.4e}  {status}\n"
+            )
+
     text = "".join(lines)
     with open(out_path, "w") as fh:
         fh.write(text)
@@ -511,6 +666,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=os.path.join("..", "results"),
     )
+    p.add_argument(
+        "--success-rel-l2-threshold",
+        type=float,
+        default=SUCCESS_REL_L2_DEFAULT,
+        help=(
+            "Final relative L^2 error below which a seed is considered "
+            "successful. Default 1.0 (= the trivial zero predictor). "
+            "Aggregates in the figure and summary table are taken over "
+            "the successful subset; tighten this if you only want clearly "
+            "trained runs."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -575,6 +742,7 @@ def main(argv: list[str] | None = None) -> None:
         adam_epochs=args.adam_epochs,
         engage_threshold=args.engage_threshold,
         seeds=seeds,
+        rel_l2_threshold=args.success_rel_l2_threshold,
     )
     plot_sweep(
         results=results,
@@ -582,6 +750,7 @@ def main(argv: list[str] | None = None) -> None:
         k=args.wavenumber,
         adam_epochs=args.adam_epochs,
         engage_threshold=args.engage_threshold,
+        rel_l2_threshold=args.success_rel_l2_threshold,
     )
 
     # Persist raw histories for later replotting.
