@@ -137,3 +137,25 @@ def test_summarize_raises_when_no_jsons(tmp_path):
     empty.mkdir()
     with pytest.raises(FileNotFoundError):
         si.build_summary(str(empty), ["Tanh"], str(tmp_path / "out.tex"))
+
+
+@pytest.mark.integration
+def test_orchestrator_runs_all_and_summarizes(tmp_path):
+    import run_interpolation_study as rs
+
+    rc = rs.run(
+        activations=["Tanh"],
+        layers=[1], neurons=[5], epochs=15, n_seeds=2,
+        collocation_points=16, patience=999, min_delta=1e-9,
+        moving_avg_window=3, linf_points=64, l2_points=64,
+        failure_log_threshold=-0.5,
+        results_dir=str(tmp_path / "results"),
+        output_dir=str(tmp_path / "figures"),
+        summary_path=str(tmp_path / "summary.tex"),
+    )
+    assert rc == 0
+    import os
+    assert os.path.exists(tmp_path / "summary.tex")
+    assert os.path.exists(
+        tmp_path / "results" / "error_table_pinn_Tanh.json"
+    )
