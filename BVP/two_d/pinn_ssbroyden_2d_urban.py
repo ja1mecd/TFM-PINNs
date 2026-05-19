@@ -177,9 +177,15 @@ class PINN_CFGS_Solver_Urban:
         mu = qmu[:, 1:2]
         return q**4 * P_qq + 2.0 * q**3 * P_q + q**2 * (1.0 - mu**2) * P_mumu
 
-    def compute_loss(self, qmu_interior: torch.Tensor, *, transform: bool):
+    def compute_loss(
+        self,
+        qmu_interior: torch.Tensor,
+        *,
+        transform: bool,
+        create_graph_second: bool = True,
+    ):
         qmu = qmu_interior.detach().clone().requires_grad_(True)
-        res = self._delta_gs(qmu, create_graph_second=True)
+        res = self._delta_gs(qmu, create_graph_second=create_graph_second)
         area = (q_max - q_min) * (mu_max - mu_min)
         J_raw = self.lambda_pde * (torch.mean(res**2) * area)
         if transform:
@@ -299,6 +305,7 @@ class PINN_CFGS_Solver_Urban:
         rad_k2: float = 1.0,
         verbose_freq: int = 200,
         diag_grid_n: int = 60,
+        diag_every: int = 0,
         seed: int = 5,
     ) -> None:
         if not (0.0 < train_split < 1.0):
@@ -307,6 +314,13 @@ class PINN_CFGS_Solver_Urban:
             raise ValueError("rad_resample_every must be >= 1.")
         if adam_epochs < 0 or adam_epochs > n_epochs:
             raise ValueError("0 <= adam_epochs <= n_epochs required.")
+        if diag_every < 0:
+            raise ValueError("diag_every must be >= 0.")
+
+        # Grid-diagnostic recompute cadence. Decoupled from verbose_freq so
+        # the trajectory curves can stay smooth without printing every step;
+        # 0 falls back to verbose_freq.
+        diag_period = diag_every if diag_every > 0 else verbose_freq
 
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -325,6 +339,16 @@ class PINN_CFGS_Solver_Urban:
 
         qmu_train, qmu_val = fresh_uniform()
 
+        # Grid diagnostics (compute_pde_l2/sol_l2/sol_rel_l2) each require a
+        # double-backward and/or full grid rebuild over diag_grid_n^2 points.
+        # Recompute them only at the verbose cadence and reuse the cached
+        # value in between, exactly as pinn_helmholtz_2d.py does — the logged
+        # arrays stay full-length and the values at the cadence (and the
+        # final value) are unchanged.
+        last_pde_l2 = float("nan")
+        last_sol_l2 = float("nan")
+        last_sol_rel_l2 = float("nan")
+
         # ---- Adam warmup (uniform sampling) ----
         for epoch in range(1, adam_epochs + 1):
             if epoch != 1 and ((epoch - 1) % rad_resample_every == 0):
@@ -334,13 +358,19 @@ class PINN_CFGS_Solver_Urban:
             self.J_train.append(J_raw)
 
             with torch.enable_grad():
-                _, J_val_raw = self.compute_loss(qmu_val, transform=False)
+                _, J_val_raw = self.compute_loss(
+                    qmu_val, transform=False, create_graph_second=False
+                )
             self.J_val.append(float(J_val_raw.item()))
             self.obj_val.append(float(J_val_raw.item()))
 
-            self.pde_l2.append(self.compute_pde_l2(n=diag_grid_n))
-            self.sol_l2.append(self.compute_sol_l2(n=diag_grid_n))
-            self.sol_rel_l2.append(self.compute_sol_rel_l2(n=diag_grid_n))
+            if epoch == 1 or epoch % diag_period == 0 or epoch == adam_epochs:
+                last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
+                last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
+                last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
+            self.pde_l2.append(last_pde_l2)
+            self.sol_l2.append(last_sol_l2)
+            self.sol_rel_l2.append(last_sol_rel_l2)
 
             if epoch % verbose_freq == 0:
                 print(
@@ -373,13 +403,19 @@ class PINN_CFGS_Solver_Urban:
             self.J_train.append(J_raw)
 
             with torch.enable_grad():
-                J_val_obj, J_val_raw = self.compute_loss(qmu_val, transform=True)
+                J_val_obj, J_val_raw = self.compute_loss(
+                    qmu_val, transform=True, create_graph_second=False
+                )
             self.J_val.append(float(J_val_raw.item()))
             self.obj_val.append(float(J_val_obj.item()))
 
-            self.pde_l2.append(self.compute_pde_l2(n=diag_grid_n))
-            self.sol_l2.append(self.compute_sol_l2(n=diag_grid_n))
-            self.sol_rel_l2.append(self.compute_sol_rel_l2(n=diag_grid_n))
+            if qn_iter == 1 or epoch % diag_period == 0 or epoch == n_epochs:
+                last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
+                last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
+                last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
+            self.pde_l2.append(last_pde_l2)
+            self.sol_l2.append(last_sol_l2)
+            self.sol_rel_l2.append(last_sol_rel_l2)
 
             if epoch % verbose_freq == 0 or epoch == n_epochs:
                 d = self.qn.diagnostics()
@@ -537,6 +573,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rad-k2", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=5)
     p.add_argument("--diag-grid-n", type=int, default=60)
+    p.add_argument(
+        "--diag-every", type=int, default=0,
+        help="Grid-diagnostic recompute cadence (epochs). 0 -> use verbose-freq.",
+    )
     p.add_argument("--H-on-cpu", action="store_true")
     p.add_argument("--run-tag", default=None)
     return p.parse_args()
@@ -570,6 +610,7 @@ def main() -> None:
         rad_k2=args.rad_k2,
         seed=args.seed,
         diag_grid_n=args.diag_grid_n,
+        diag_every=args.diag_every,
     )
 
     run_tag = args.run_tag or time.strftime("%Y%m%d_%H%M%S")

@@ -86,6 +86,7 @@ def run_one(
     rad_k2: float,
     initial_scale: bool,
     h_on_cpu: bool,
+    diag_every: int,
 ) -> SeedResult:
     # Seed before model construction so weight init is reproducible per seed;
     # train() re-seeds the data sampling with the same value internally.
@@ -115,6 +116,7 @@ def run_one(
         rad_k2=rad_k2,
         verbose_freq=max(1, n_epochs // 5),
         diag_grid_n=60,
+        diag_every=diag_every,
         seed=seed,
     )
     return SeedResult(
@@ -143,6 +145,7 @@ def run_sweep(
     rad_k2: float,
     initial_scale: bool,
     h_on_cpu: bool,
+    diag_every: int,
 ) -> tuple[LambdaResult, ...]:
     out: list[LambdaResult] = []
     for lam in lambdas:
@@ -161,6 +164,7 @@ def run_sweep(
                 rad_k1=rad_k1, rad_k2=rad_k2,
                 initial_scale=initial_scale,
                 h_on_cpu=h_on_cpu,
+                diag_every=diag_every,
             ))
         out.append(LambdaResult(lambda_=lam, seeds=tuple(seed_runs)))
     return tuple(out)
@@ -321,6 +325,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--hidden", type=int, nargs="+", default=[30])
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--initial-scale", action="store_true")
+    p.add_argument(
+        "--diag-every", type=int, default=100,
+        help="Grid-diagnostic recompute cadence in epochs (pde/sol L2). "
+             "Keeps trajectory curves smooth while skipping most steps. "
+             "0 -> fall back to the (coarse) verbose cadence.",
+    )
     p.add_argument("--H-on-cpu", action="store_true")
     p.add_argument("--results-dir", type=str, default=os.path.join("..", "results"))
     return p.parse_args(argv)
@@ -363,6 +373,7 @@ def main(argv: list[str] | None = None) -> None:
         rad_k1=args.rad_k1, rad_k2=args.rad_k2,
         initial_scale=args.initial_scale,
         h_on_cpu=args.H_on_cpu,
+        diag_every=args.diag_every,
     )
 
     write_summary(
