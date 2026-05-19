@@ -127,3 +127,13 @@ def test_summarize_builds_latex_from_jsons(tmp_path):
     assert r"\begin{tabular}" in text
     assert "Tanh" in text and "ReLU" in text
     assert "Sigmoid" not in text  # JSON absent -> skipped, not crashed
+
+
+@pytest.mark.integration
+def test_summarize_raises_when_no_jsons(tmp_path):
+    import summarize_interpolation as si
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError):
+        si.build_summary(str(empty), ["Tanh"], str(tmp_path / "out.tex"))

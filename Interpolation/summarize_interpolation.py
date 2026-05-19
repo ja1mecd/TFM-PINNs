@@ -16,6 +16,11 @@ from interpolation_stats import load_json, to_latex_summary
 
 DEFAULT_ACTIVATIONS = ["Tanh", "Sigmoid", "ReLU", "Softmax"]
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_OUTPUT = os.path.join(
+    _HERE, "..", "..", "thesis", "tables", "interpolation_summary.tex"
+)
+
 
 def build_summary(results_dir: str, activations: list[str],
                   output_path: str) -> str:
@@ -27,7 +32,9 @@ def build_summary(results_dir: str, activations: list[str],
             continue
         sweeps.append(load_json(path))
     if not sweeps:
-        raise SystemExit("No result JSONs found; run error_table_pinn.py first.")
+        raise FileNotFoundError(
+            "No result JSONs found; run error_table_pinn.py first."
+        )
 
     tex = to_latex_summary(sweeps)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -43,11 +50,14 @@ def main() -> None:
     p.add_argument("--activations", nargs="+", default=DEFAULT_ACTIVATIONS)
     p.add_argument(
         "--output",
-        default=os.path.join("..", "..", "thesis", "tables",
-                             "interpolation_summary.tex"),
+        default=DEFAULT_OUTPUT,
+        help="Output .tex path (default: thesis/tables/, relative to repo).",
     )
     args = p.parse_args()
-    build_summary(args.results_dir, args.activations, args.output)
+    try:
+        build_summary(args.results_dir, args.activations, args.output)
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":
