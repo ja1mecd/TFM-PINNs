@@ -14,8 +14,11 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
+from dataclasses import asdict
+from typing import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -71,6 +74,15 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _write_partial(results_dir: str, activation: str,
+                    cells: list[CellResult]) -> None:
+    """Checkpoint raw cells so an unattended crash loses at most one cell."""
+    os.makedirs(results_dir, exist_ok=True)
+    path = os.path.join(results_dir, f"error_table_pinn_{activation}.partial.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump([asdict(c) for c in cells], fh, indent=2)
+
+
 def run_sweep(args: argparse.Namespace) -> list[CellResult]:
     activation_factory = ACTIVATIONS[args.activation]
     seeds = list(range(args.seed_base, args.seed_base + args.n_seeds))
@@ -84,49 +96,71 @@ def run_sweep(args: argparse.Namespace) -> list[CellResult]:
     for n_layers in args.layers:
         for n_neurons in args.neurons:
             done += 1
-            for seed in seeds:
-                set_seed(seed)
-                hidden = [n_neurons] * n_layers
-                model = NeuralNetwork(
-                    hidden_layers=hidden,
-                    activation=activation_factory(),
-                )
-                pinn = PINN_L2_Minimizer(model, lr=1e-3)
-
-                t0 = time.perf_counter()
-                epochs_run = pinn.train(
-                    n_epochs=args.epochs,
-                    n_collocation_points=args.collocation_points,
-                    verbose_freq=max(1, args.epochs),
-                    patience=args.patience,
-                    min_delta=args.min_delta,
-                    moving_avg_window=args.moving_avg_window,
-                    l2_points=args.l2_points,
-                )
-                dt = time.perf_counter() - t0
-
-                linf = pinn.compute_linf_error(n_points=args.linf_points)
-                l2 = pinn.compute_exact_l2_norm(n_points=args.l2_points)
-                cells.append(CellResult(
-                    layers=n_layers, neurons=n_neurons, seed=seed,
-                    linf=float(linf), l2=float(l2),
-                    train_time_s=float(dt), epochs_run=int(epochs_run),
-                ))
             print(f"[cell {done}/{n_cells}] L={n_layers} W={n_neurons} "
-                  f"done ({len(seeds)} seeds)")
+                  f"— starting {len(seeds)} seeds")
+            for seed in seeds:
+                t0 = time.perf_counter()
+                try:
+                    set_seed(seed)
+                    hidden = [n_neurons] * n_layers
+                    model = NeuralNetwork(
+                        hidden_layers=hidden,
+                        activation=activation_factory(),
+                    )
+                    pinn = PINN_L2_Minimizer(model, lr=1e-3)
+                    epochs_run = pinn.train(
+                        n_epochs=args.epochs,
+                        n_collocation_points=args.collocation_points,
+                        verbose_freq=max(1, args.epochs),
+                        patience=args.patience,
+                        min_delta=args.min_delta,
+                        moving_avg_window=args.moving_avg_window,
+                        l2_points=args.l2_points,
+                    )
+                    dt = time.perf_counter() - t0
+                    linf = pinn.compute_linf_error(n_points=args.linf_points)
+                    l2 = pinn.compute_exact_l2_norm(n_points=args.l2_points)
+                    cells.append(CellResult(
+                        layers=n_layers, neurons=n_neurons, seed=seed,
+                        linf=float(linf), l2=float(l2),
+                        train_time_s=float(dt), epochs_run=int(epochs_run),
+                    ))
+                    print(f"  seed={seed} linf={linf:.3e} dt={dt:.1f}s")
+                except Exception as exc:  # unattended run: never lose the sweep
+                    dt = time.perf_counter() - t0
+                    print(f"  [WARN] L={n_layers} W={n_neurons} seed={seed} "
+                          f"failed after {dt:.1f}s: {exc!r} — recording inf")
+                    cells.append(CellResult(
+                        layers=n_layers, neurons=n_neurons, seed=seed,
+                        linf=float("inf"), l2=float("inf"),
+                        train_time_s=float(dt), epochs_run=0,
+                    ))
+            _write_partial(args.results_dir, args.activation, cells)
 
     return cells
 
 
-def plot_heatmap(linf_mean, layers, neurons, activation, output_path):
-    log_errors = np.log10(np.array(linf_mean))
+def plot_heatmap(linf_mean: Sequence[Sequence[float]], layers: list[int],
+                 neurons: list[int], activation: str,
+                 output_path: str) -> None:
+    arr = np.array(linf_mean, dtype=float)
+    with np.errstate(divide="ignore"):
+        log_errors = np.log10(arr)
+    masked = np.ma.masked_invalid(log_errors)
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    im = ax.imshow(log_errors, cmap="viridis", aspect="auto", origin="lower")
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad(color="lightgray")
+    im = ax.imshow(masked, cmap=cmap, aspect="auto", origin="lower")
+    mean_finite = masked.mean() if masked.count() else 0.0
     for i in range(len(layers)):
         for j in range(len(neurons)):
             val = log_errors[i, j]
-            color = "white" if val < log_errors.mean() else "black"
+            if not np.isfinite(val):
+                ax.text(j, i, "fail", ha="center", va="center",
+                        color="black")
+                continue
+            color = "white" if val < mean_finite else "black"
             ax.text(j, i, f"{val:.2f}", ha="center", va="center", color=color)
 
     cbar = fig.colorbar(im, ax=ax)
@@ -148,7 +182,8 @@ def plot_heatmap(linf_mean, layers, neurons, activation, output_path):
     print(f"\nSaved heatmap to {output_path}")
 
 
-def persist(args: argparse.Namespace, cells: list[CellResult]):
+def persist(args: argparse.Namespace,
+            cells: list[CellResult]) -> tuple[str, str]:
     """Aggregate, write JSON + heatmap. Returns (json_path, heatmap_path)."""
     sweep = aggregate(
         activation=args.activation,
