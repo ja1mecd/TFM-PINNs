@@ -4,6 +4,7 @@ import pytest
 
 from interpolation_stats import CellResult, SweepResult, aggregate
 from interpolation_stats import save_json, load_json
+from interpolation_stats import to_latex_summary
 
 
 def _cells_two_by_one():
@@ -90,3 +91,25 @@ def test_load_json_raises_valueerror_on_corrupt_file(tmp_path):
     bad.write_text("{ not valid json")
     with pytest.raises(ValueError, match="Failed to load SweepResult"):
         load_json(str(bad))
+
+
+@pytest.mark.unit
+def test_latex_summary_has_row_per_activation():
+    tanh = aggregate(
+        activation="Tanh", layers=[1], neurons=[5],
+        cells=_cells_two_by_one(),
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+    )
+    relu = aggregate(
+        activation="ReLU", layers=[1], neurons=[5],
+        cells=_cells_two_by_one(),
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+    )
+    tex = to_latex_summary([tanh, relu])
+    assert r"\begin{tabular}" in tex
+    assert "Tanh" in tex and "ReLU" in tex
+    # best cell for the 1x1 grid is (L=1, W=5)
+    assert "(1, 5)" in tex
+    # mean+-std rendered with \pm and scientific notation
+    assert r"\pm" in tex
+    assert tex.count(r"\\") >= 2  # at least two data rows

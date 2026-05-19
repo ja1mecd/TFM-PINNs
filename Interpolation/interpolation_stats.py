@@ -155,3 +155,59 @@ def load_json(path: str) -> SweepResult:
         raise ValueError(
             f"Failed to load SweepResult from {path!r}: {exc}"
         ) from exc
+
+
+def _fmt_pm(mean: float, std: float) -> str:
+    return rf"({mean:.2e} \pm {std:.2e})"
+
+
+def _best_cell(sweep: SweepResult) -> tuple[int, int, float, float, float, float]:
+    best = None
+    for i, L in enumerate(sweep.layers):
+        for j, W in enumerate(sweep.neurons):
+            m = sweep.linf_mean[i][j]
+            if best is None or m < best[2]:
+                best = (L, W, m, sweep.linf_std[i][j],
+                        sweep.l2_mean[i][j], sweep.l2_std[i][j])
+    assert best is not None
+    return best
+
+
+def to_latex_summary(sweeps: Sequence[SweepResult]) -> str:
+    """Cross-activation summary table, analogous to TFM-4 Table 4.1.
+
+    Columns: activation, best (L, W), L-inf (mean +- std),
+    L2 (mean +- std), failed cells / total, mean time per cell [s].
+    """
+    lines = [
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\begin{tabular}{lccccc}",
+        r"\hline",
+        r"Activation & Best $(L,W)$ & $\varepsilon_\infty$ "
+        r"& $L^2$ & Failed & Time/cell [s] \\",
+        r"\hline",
+    ]
+    for sw in sweeps:
+        L, W, lm, ls, l2m, l2s = _best_cell(sw)
+        total = len(sw.layers) * len(sw.neurons)
+        failed = sum(sum(row) for row in sw.n_failed)
+        time_all = [t for row in sw.time_mean for t in row]
+        tmean = sum(time_all) / len(time_all)
+        lines.append(
+            f"{sw.activation} & ({L}, {W}) & {_fmt_pm(lm, ls)} & "
+            f"{_fmt_pm(l2m, l2s)} & {failed}/{total} & {tmean:.2f} \\\\"
+        )
+    lines += [
+        r"\hline",
+        r"\end{tabular}",
+        r"\caption{One-dimensional interpolation benchmark: best "
+        r"architecture per activation over the $L\in\{1..7\}\times "
+        r"W\in\{5,10,20,40,80\}$ grid, with $L^\infty$ and $L^2$ errors "
+        r"(mean $\pm$ std over the seed ensemble), number of cells that "
+        r"failed to train, and mean training time per cell.}",
+        r"\label{tab:interp-summary}",
+        r"\end{table}",
+        "",
+    ]
+    return "\n".join(lines)
