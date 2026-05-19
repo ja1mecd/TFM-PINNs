@@ -154,8 +154,5 @@ def test_orchestrator_runs_all_and_summarizes(tmp_path):
         summary_path=str(tmp_path / "summary.tex"),
     )
     assert rc == 0
-    import os
-    assert os.path.exists(tmp_path / "summary.tex")
-    assert os.path.exists(
-        tmp_path / "results" / "error_table_pinn_Tanh.json"
-    )
+    assert (tmp_path / "summary.tex").exists()
+    assert (tmp_path / "results" / "error_table_pinn_Tanh.json").exists()

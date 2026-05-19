@@ -21,6 +21,13 @@ def run(*, activations, layers, neurons, epochs, n_seeds,
         collocation_points, patience, min_delta, moving_avg_window,
         linf_points, l2_points, failure_log_threshold,
         results_dir, output_dir, summary_path, seed_base=42) -> int:
+    """Run the sweep+persist for each activation, then build the summary.
+
+    Returns 0 on success. Per-seed training failures are absorbed inside
+    ``error_table_pinn.run_sweep`` (sentinel + per-cell checkpoint); an
+    activation-level error (e.g. an unknown activation key) propagates
+    uncaught so the unattended run fails loudly rather than silently.
+    """
     for act in activations:
         args = argparse.Namespace(
             activation=act, layers=layers, neurons=neurons, epochs=epochs,
