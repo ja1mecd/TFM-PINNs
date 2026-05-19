@@ -90,7 +90,7 @@ def aggregate(
     l2_std = grid(lambda p: _pop_std([c.l2 for c in p]))
     time_mean = grid(lambda p: _mean([c.train_time_s for c in p]))
     n_failed = grid(
-        lambda p: int(math.log10(_mean([c.linf for c in p]))
+        lambda p: int(math.log10(max(_mean([c.linf for c in p]), machine_eps))
                       > failure_log_threshold)
     )
 

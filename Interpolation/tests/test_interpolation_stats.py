@@ -51,3 +51,20 @@ def test_aggregate_flags_failed_cell():
     # log10(mean linf) = log10(1.65) > -0.5  -> failed
     assert sweep.n_failed[0][0] == 1
     assert math.isfinite(sweep.linf_mean[0][0])
+
+
+@pytest.mark.unit
+def test_aggregate_handles_zero_linf_without_crashing():
+    cells = [
+        CellResult(layers=1, neurons=5, seed=42, linf=0.0, l2=0.0,
+                   train_time_s=1.0, epochs_run=10),
+        CellResult(layers=1, neurons=5, seed=43, linf=0.0, l2=0.0,
+                   train_time_s=1.0, epochs_run=10),
+    ]
+    sweep = aggregate(
+        activation="Tanh", layers=[1], neurons=[5], cells=cells,
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+    )
+    # mean linf == 0 -> clamped to machine_eps; log10(1.19e-7) < -0.5
+    # so the cell is NOT flagged as failed.
+    assert sweep.n_failed[0][0] == 0
