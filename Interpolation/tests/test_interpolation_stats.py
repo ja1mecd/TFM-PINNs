@@ -82,3 +82,11 @@ def test_json_round_trip(tmp_path):
     save_json(sweep, str(path))
     loaded = load_json(str(path))
     assert loaded == sweep
+
+
+@pytest.mark.unit
+def test_load_json_raises_valueerror_on_corrupt_file(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not valid json")
+    with pytest.raises(ValueError, match="Failed to load SweepResult"):
+        load_json(str(bad))
