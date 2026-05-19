@@ -133,7 +133,7 @@ def run_sweep(args: argparse.Namespace) -> list[CellResult]:
                     cells.append(CellResult(
                         layers=n_layers, neurons=n_neurons, seed=seed,
                         linf=float("inf"), l2=float("inf"),
-                        train_time_s=float(dt), epochs_run=0,
+                        train_time_s=float("nan"), epochs_run=0,
                     ))
             _write_partial(args.results_dir, args.activation, cells)
 

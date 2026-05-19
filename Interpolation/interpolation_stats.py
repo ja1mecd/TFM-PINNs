@@ -54,8 +54,25 @@ def _mean(xs: Sequence[float]) -> float:
 
 
 def _pop_std(xs: Sequence[float]) -> float:
+    """Population standard deviation (divides by N, not N-1).
+
+    The thesis cites these as 'std over the seed ensemble'; the
+    population estimator is the deliberate, documented choice.
+    """
     m = _mean(xs)
     return math.sqrt(sum((x - m) ** 2 for x in xs) / len(xs))
+
+
+def _finite_mean(xs: Sequence[float]) -> float:
+    """Mean over finite entries only; NaN if none are finite.
+
+    Used for the timing column so a crashed run (recorded with
+    ``train_time_s=nan``) does not bias mean training time.
+    """
+    finite = [x for x in xs if math.isfinite(x)]
+    if not finite:
+        return float("nan")
+    return sum(finite) / len(finite)
 
 
 def aggregate(
@@ -88,7 +105,7 @@ def aggregate(
     linf_std = grid(lambda p: _pop_std([c.linf for c in p]))
     l2_mean = grid(lambda p: _mean([c.l2 for c in p]))
     l2_std = grid(lambda p: _pop_std([c.l2 for c in p]))
-    time_mean = grid(lambda p: _mean([c.train_time_s for c in p]))
+    time_mean = grid(lambda p: _finite_mean([c.train_time_s for c in p]))
     n_failed = grid(
         lambda p: int(math.log10(max(_mean([c.linf for c in p]), machine_eps))
                       > failure_log_threshold)
@@ -175,7 +192,22 @@ def _escape_latex(s: str) -> str:
 
 
 def _fmt_pm(mean: float, std: float) -> str:
-    return rf"({mean:.2e} \pm {std:.2e})"
+    r"""Format ``mean ± std`` as a math-mode LaTeX cell, TFM-4 style.
+
+    Produces ``$(m.mm \pm s.ss)\times 10^{e}$`` with a shared exponent
+    taken from the mean, matching the reference table 4.1. Non-finite
+    means (e.g. an all-failed activation) render as ``$\mathrm{n/a}$``.
+    Must be math-mode delimited: the table columns are text-mode, so a
+    bare ``\pm`` would break ``pdflatex``.
+    """
+    if not math.isfinite(mean):
+        return r"$\mathrm{n/a}$"
+    if mean == 0.0:
+        exp = 0
+    else:
+        exp = math.floor(math.log10(abs(mean)))
+    scale = 10.0 ** exp
+    return rf"$({mean / scale:.2f} \pm {std / scale:.2f})\times 10^{{{exp}}}$"
 
 
 def _best_cell(sweep: SweepResult) -> tuple[int, int, float, float, float, float]:

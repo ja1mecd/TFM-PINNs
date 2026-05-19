@@ -112,10 +112,11 @@ def test_latex_summary_has_row_per_activation():
     assert "(1, 5)" in tex
     # mean+-std rendered with \pm and scientific notation
     assert r"\pm" in tex
-    # deterministic content from _cells_two_by_one(): linf mean/std, time, failed
-    assert "2.00e-02" in tex   # linf_mean
-    assert "1.00e-02" in tex   # linf_std
-    assert "2.00" in tex       # mean time/cell
+    # _cells_two_by_one(): linf {1e-2,3e-2} -> mean 2e-2 std 1e-2;
+    #   l2 {2e-3,4e-3} -> mean 3e-3 std 1e-3. Shared-exponent, math mode.
+    assert r"$(2.00 \pm 1.00)\times 10^{-2}$" in tex   # linf cell
+    assert r"$(3.00 \pm 1.00)\times 10^{-3}$" in tex   # l2 cell
+    assert "2.00" in tex       # mean time/cell column
     assert "0/1" in tex        # failed / total cells
     assert tex.count(r"\\") >= 3  # header row + two data rows
 
@@ -130,3 +131,14 @@ def test_latex_summary_escapes_activation_name():
     tex = to_latex_summary([sw])
     assert r"Leaky\_ReLU" in tex
     assert "Leaky_ReLU" not in tex.replace(r"Leaky\_ReLU", "")
+
+
+@pytest.mark.unit
+def test_fmt_pm_is_math_mode_and_handles_nonfinite():
+    from interpolation_stats import _fmt_pm
+    s = _fmt_pm(2e-2, 1e-2)
+    assert s.startswith("$") and s.endswith("$")     # math-mode delimited
+    assert r"\times 10^{-2}" in s
+    assert "e-0" not in s                              # no raw sci-notation
+    assert _fmt_pm(float("inf"), float("inf")) == r"$\mathrm{n/a}$"
+    assert _fmt_pm(float("nan"), 0.0) == r"$\mathrm{n/a}$"
