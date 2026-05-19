@@ -3,9 +3,11 @@ import pytest
 
 @pytest.mark.integration
 def test_train_returns_epochs_run():
+    import torch
     import torch.nn as nn
     from pinn_interpolant_l2 import NeuralNetwork, PINN_L2_Minimizer
 
+    torch.manual_seed(0)
     model = NeuralNetwork(hidden_layers=[5], activation=nn.Tanh())
     pinn = PINN_L2_Minimizer(model, lr=1e-3)
     epochs = pinn.train(
