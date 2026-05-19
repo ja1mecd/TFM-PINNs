@@ -157,6 +157,23 @@ def load_json(path: str) -> SweepResult:
         ) from exc
 
 
+def _escape_latex(s: str) -> str:
+    """Escape LaTeX specials for plain-text table cells.
+
+    Backslash is replaced first so the replacement strings (which
+    themselves contain no other specials handled here) are not
+    re-escaped.
+    """
+    s = s.replace("\\", r"\textbackslash{}")
+    for char, repl in (
+        ("&", r"\&"), ("%", r"\%"), ("$", r"\$"), ("#", r"\#"),
+        ("_", r"\_"), ("^", r"\textasciicircum{}"),
+        ("~", r"\textasciitilde{}"),
+    ):
+        s = s.replace(char, repl)
+    return s
+
+
 def _fmt_pm(mean: float, std: float) -> str:
     return rf"({mean:.2e} \pm {std:.2e})"
 
@@ -169,7 +186,10 @@ def _best_cell(sweep: SweepResult) -> tuple[int, int, float, float, float, float
             if best is None or m < best[2]:
                 best = (L, W, m, sweep.linf_std[i][j],
                         sweep.l2_mean[i][j], sweep.l2_std[i][j])
-    assert best is not None
+    if best is None:
+        raise ValueError(
+            "SweepResult has no grid cells; cannot determine best cell."
+        )
     return best
 
 
@@ -195,14 +215,14 @@ def to_latex_summary(sweeps: Sequence[SweepResult]) -> str:
         time_all = [t for row in sw.time_mean for t in row]
         tmean = sum(time_all) / len(time_all)
         lines.append(
-            f"{sw.activation} & ({L}, {W}) & {_fmt_pm(lm, ls)} & "
+            f"{_escape_latex(sw.activation)} & ({L}, {W}) & {_fmt_pm(lm, ls)} & "
             f"{_fmt_pm(l2m, l2s)} & {failed}/{total} & {tmean:.2f} \\\\"
         )
     lines += [
         r"\hline",
         r"\end{tabular}",
         r"\caption{One-dimensional interpolation benchmark: best "
-        r"architecture per activation over the $L\in\{1..7\}\times "
+        r"architecture per activation over the $L\in\{1,\ldots,7\}\times "
         r"W\in\{5,10,20,40,80\}$ grid, with $L^\infty$ and $L^2$ errors "
         r"(mean $\pm$ std over the seed ensemble), number of cells that "
         r"failed to train, and mean training time per cell.}",

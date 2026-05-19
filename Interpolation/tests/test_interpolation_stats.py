@@ -112,4 +112,21 @@ def test_latex_summary_has_row_per_activation():
     assert "(1, 5)" in tex
     # mean+-std rendered with \pm and scientific notation
     assert r"\pm" in tex
-    assert tex.count(r"\\") >= 2  # at least two data rows
+    # deterministic content from _cells_two_by_one(): linf mean/std, time, failed
+    assert "2.00e-02" in tex   # linf_mean
+    assert "1.00e-02" in tex   # linf_std
+    assert "2.00" in tex       # mean time/cell
+    assert "0/1" in tex        # failed / total cells
+    assert tex.count(r"\\") >= 3  # header row + two data rows
+
+
+@pytest.mark.unit
+def test_latex_summary_escapes_activation_name():
+    sw = aggregate(
+        activation="Leaky_ReLU", layers=[1], neurons=[5],
+        cells=_cells_two_by_one(),
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+    )
+    tex = to_latex_summary([sw])
+    assert r"Leaky\_ReLU" in tex
+    assert "Leaky_ReLU" not in tex.replace(r"Leaky\_ReLU", "")
