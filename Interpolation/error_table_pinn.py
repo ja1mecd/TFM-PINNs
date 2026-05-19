@@ -1,34 +1,34 @@
-"""Architecture sweep for the 1D interpolation benchmark.
+"""Architecture sweep for the 1D interpolation benchmark (thesis section 4.1).
 
-Reproduces Figure 4.1 of the thesis (section 4.1, "Approximation of
-functions in one dimension"). For a fixed activation, trains an
-L x W grid of fully connected networks with empirical squared error
-loss and reports the L-infinity error on a dense validation grid.
-
-The target function and interval are imported from
-`pinn_interpolant_l2` to avoid duplicate sources of truth — that
-module is what defines the problem actually being solved during
-training.
+For a fixed activation, trains an L x W grid of fully connected networks
+with empirical squared-error loss, repeated over a seed ensemble, and
+records the L-infinity and L2 errors and training time per run. Mean
+log10 L-infinity is shown as a heatmap; raw per-seed records are written
+as JSON for `summarize_interpolation.py` and for the section 4.1 prose.
 
 Usage
 -----
-    python error_table_pinn.py                       # Tanh, default grid
-    python error_table_pinn.py --activation Sigmoid
-    python error_table_pinn.py --activation ReLU --output custom.png
+    python error_table_pinn.py                        # Tanh, 20 seeds
+    python error_table_pinn.py --activation ReLU --n-seeds 20
 """
 from __future__ import annotations
 
 import argparse
 import os
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 
+from interpolation_stats import CellResult, aggregate, save_json
 from pinn_interpolant_l2 import NeuralNetwork, PINN_L2_Minimizer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# float32 training tensors -> single-precision machine epsilon.
+MACHINE_EPS = float(np.finfo(np.float32).eps)  # ~1.1920929e-07
 
 ACTIVATIONS = {
     "Tanh": nn.Tanh,
@@ -38,102 +38,91 @@ ACTIVATIONS = {
 }
 
 
+def set_seed(seed: int) -> None:
+    """Seed every RNG that affects a training run."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Architecture sweep over (depth, width) for 1D interpolation."
+    p = argparse.ArgumentParser(
+        description="Multi-seed architecture sweep for 1D interpolation."
     )
-    parser.add_argument(
-        "--activation",
-        choices=list(ACTIVATIONS),
-        default="Tanh",
-        help="Activation function used in every layer (default: Tanh).",
-    )
-    parser.add_argument(
-        "--layers",
-        type=int,
-        nargs="+",
-        default=[1, 2, 3, 4, 5, 6, 7],
-        help="Hidden-layer counts to sweep (default: 1..7).",
-    )
-    parser.add_argument(
-        "--neurons",
-        type=int,
-        nargs="+",
-        default=[5, 10, 20, 40, 80],
-        help="Neurons per layer to sweep (default: 5,10,20,40,80).",
-    )
-    parser.add_argument("--epochs", type=int, default=10000)
-    parser.add_argument("--collocation-points", type=int, default=200)
-    parser.add_argument("--patience", type=int, default=200)
-    parser.add_argument("--min-delta", type=float, default=1e-7)
-    parser.add_argument("--moving-avg-window", type=int, default=20)
-    parser.add_argument("--linf-points", type=int, default=2000)
-    parser.add_argument("--output-dir", type=str, default="figures")
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help=(
-            "Output PNG path. Defaults to "
-            "<output-dir>/error_table_pinn_log_<activation>.png."
-        ),
-    )
-    parser.add_argument("--seed", type=int, default=42)
-    return parser.parse_args()
+    p.add_argument("--activation", choices=list(ACTIVATIONS), default="Tanh")
+    p.add_argument("--layers", type=int, nargs="+",
+                   default=[1, 2, 3, 4, 5, 6, 7])
+    p.add_argument("--neurons", type=int, nargs="+",
+                   default=[5, 10, 20, 40, 80])
+    p.add_argument("--epochs", type=int, default=10000)
+    p.add_argument("--collocation-points", type=int, default=200)
+    p.add_argument("--patience", type=int, default=200)
+    p.add_argument("--min-delta", type=float, default=1e-7)
+    p.add_argument("--moving-avg-window", type=int, default=20)
+    p.add_argument("--linf-points", type=int, default=2000)
+    p.add_argument("--l2-points", type=int, default=200)
+    p.add_argument("--n-seeds", type=int, default=20)
+    p.add_argument("--seed-base", type=int, default=42)
+    p.add_argument("--failure-log-threshold", type=float, default=-0.5)
+    p.add_argument("--results-dir", type=str, default="results")
+    p.add_argument("--output-dir", type=str, default="figures")
+    p.add_argument("--output", type=str, default=None)
+    return p.parse_args()
 
 
-def run_sweep(args: argparse.Namespace) -> np.ndarray:
+def run_sweep(args: argparse.Namespace) -> list[CellResult]:
     activation_factory = ACTIVATIONS[args.activation]
-    layers, neurons = args.layers, args.neurons
-    error_matrix = np.zeros((len(layers), len(neurons)))
+    seeds = list(range(args.seed_base, args.seed_base + args.n_seeds))
+    n_cells = len(args.layers) * len(args.neurons)
+    cells: list[CellResult] = []
 
-    print(f"\nArchitecture sweep — activation: {args.activation}\n")
+    print(f"\nArchitecture sweep — activation: {args.activation} — "
+          f"{n_cells} cells x {len(seeds)} seeds\n")
 
-    for i, n_layers in enumerate(layers):
-        for j, n_neurons in enumerate(neurons):
-            torch.manual_seed(args.seed)
-            np.random.seed(args.seed)
+    done = 0
+    for n_layers in args.layers:
+        for n_neurons in args.neurons:
+            done += 1
+            for seed in seeds:
+                set_seed(seed)
+                hidden = [n_neurons] * n_layers
+                model = NeuralNetwork(
+                    hidden_layers=hidden,
+                    activation=activation_factory(),
+                )
+                pinn = PINN_L2_Minimizer(model, lr=1e-3)
 
-            print(
-                f"\n[{i + 1}/{len(layers)},{j + 1}/{len(neurons)}] "
-                f"Training {n_layers} layers x {n_neurons} neurons"
-            )
+                t0 = time.perf_counter()
+                epochs_run = pinn.train(
+                    n_epochs=args.epochs,
+                    n_collocation_points=args.collocation_points,
+                    verbose_freq=max(1, args.epochs),
+                    patience=args.patience,
+                    min_delta=args.min_delta,
+                    moving_avg_window=args.moving_avg_window,
+                    l2_points=args.l2_points,
+                )
+                dt = time.perf_counter() - t0
 
-            hidden = [n_neurons] * n_layers
-            model = NeuralNetwork(hidden_layers=hidden, activation=activation_factory())
-            pinn = PINN_L2_Minimizer(model, lr=1e-3)
+                linf = pinn.compute_linf_error(n_points=args.linf_points)
+                l2 = pinn.compute_exact_l2_norm(n_points=args.l2_points)
+                cells.append(CellResult(
+                    layers=n_layers, neurons=n_neurons, seed=seed,
+                    linf=float(linf), l2=float(l2),
+                    train_time_s=float(dt), epochs_run=int(epochs_run),
+                ))
+            print(f"[cell {done}/{n_cells}] L={n_layers} W={n_neurons} "
+                  f"done ({len(seeds)} seeds)")
 
-            pinn.train(
-                n_epochs=args.epochs,
-                n_collocation_points=args.collocation_points,
-                verbose_freq=max(1, args.epochs),  # silence per-epoch logs
-                patience=args.patience,
-                min_delta=args.min_delta,
-                moving_avg_window=args.moving_avg_window,
-            )
-
-            linf_err = pinn.compute_linf_error(n_points=args.linf_points)
-            error_matrix[i, j] = linf_err
-            print(
-                f"L-inf error ({n_layers} layers, {n_neurons} neurons) = "
-                f"{linf_err:.6e}"
-            )
-
-    return error_matrix
+    return cells
 
 
-def plot_heatmap(
-    error_matrix: np.ndarray,
-    layers: list[int],
-    neurons: list[int],
-    activation: str,
-    output_path: str,
-) -> None:
-    log_errors = np.log10(error_matrix)
+def plot_heatmap(linf_mean, layers, neurons, activation, output_path):
+    log_errors = np.log10(np.array(linf_mean))
 
     fig, ax = plt.subplots(figsize=(12, 6))
     im = ax.imshow(log_errors, cmap="viridis", aspect="auto", origin="lower")
-
     for i in range(len(layers)):
         for j in range(len(neurons)):
             val = log_errors[i, j]
@@ -141,8 +130,7 @@ def plot_heatmap(
             ax.text(j, i, f"{val:.2f}", ha="center", va="center", color=color)
 
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label(r"$\log_{10} \varepsilon_\infty$")
-
+    cbar.set_label(r"$\log_{10} \varepsilon_\infty$ (mean over seeds)")
     ax.set_xticks(range(len(neurons)))
     ax.set_yticks(range(len(layers)))
     ax.set_xticklabels(neurons)
@@ -150,29 +138,49 @@ def plot_heatmap(
     ax.set_xlabel("Neurons per layer (W)")
     ax.set_ylabel("Hidden layers (L)")
     ax.set_title(
-        rf"$\log_{{10}} \varepsilon_\infty$ on the depth/width grid — {activation}"
+        rf"$\log_{{10}} \varepsilon_\infty$ on the depth/width grid — "
+        rf"{activation} (mean over seeds)"
     )
-
     plt.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=200)
+    plt.close(fig)
     print(f"\nSaved heatmap to {output_path}")
+
+
+def persist(args: argparse.Namespace, cells: list[CellResult]):
+    """Aggregate, write JSON + heatmap. Returns (json_path, heatmap_path)."""
+    sweep = aggregate(
+        activation=args.activation,
+        layers=args.layers,
+        neurons=args.neurons,
+        cells=cells,
+        failure_log_threshold=args.failure_log_threshold,
+        machine_eps=MACHINE_EPS,
+    )
+    os.makedirs(args.results_dir, exist_ok=True)
+    json_path = os.path.join(
+        args.results_dir, f"error_table_pinn_{args.activation}.json"
+    )
+    save_json(sweep, json_path)
+    print(f"Saved raw results to {json_path}")
+
+    if args.output is None:
+        os.makedirs(args.output_dir, exist_ok=True)
+        heatmap_path = os.path.join(
+            args.output_dir, f"error_table_pinn_log_{args.activation}.png"
+        )
+    else:
+        heatmap_path = args.output
+    plot_heatmap(sweep.linf_mean, args.layers, args.neurons,
+                 args.activation, heatmap_path)
+    return json_path, heatmap_path
 
 
 def main() -> None:
     args = parse_args()
-    if args.output is None:
-        os.makedirs(args.output_dir, exist_ok=True)
-        args.output = os.path.join(
-            args.output_dir, f"error_table_pinn_log_{args.activation}.png"
-        )
-
-    error_matrix = run_sweep(args)
-
-    print("\nL-inf error matrix:\n")
-    print(error_matrix)
-
-    plot_heatmap(error_matrix, args.layers, args.neurons, args.activation, args.output)
+    cells = run_sweep(args)
+    persist(args, cells)
 
 
 if __name__ == "__main__":
