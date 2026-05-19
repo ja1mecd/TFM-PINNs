@@ -3,9 +3,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
-from scipy import integrate
 import os
 import inspect
+# NOTE: scipy is imported lazily inside plot_results() (the only place it is
+# used). The architecture sweep imports this module but never plots, so it
+# must not require scipy — keeps the GPU-box sweep dependency-free.
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -265,6 +267,7 @@ class PINN_L2_Minimizer:
         print(f"Max Error: {abs_error.max():.6f}")
         print(f"Mean Error: {abs_error.mean():.6f}")
 
+        from scipy import integrate  # lazy: only the dissected-run plot needs it
         theoretical_l2 = np.sqrt(integrate.quad(lambda x: f(x)**2, -1, 1)[0])
         print(f"Theoretical L2 of f(x): {theoretical_l2:.6f}")
 
