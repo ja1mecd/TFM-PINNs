@@ -1,3 +1,5 @@
+from __future__ import annotations  # PEP 563: defer annotation eval (Py3.7 GPU box)
+
 import numpy as np
 import torch
 import torch.nn as nn

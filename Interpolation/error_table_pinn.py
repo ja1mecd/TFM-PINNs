@@ -14,6 +14,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import time
@@ -149,7 +150,7 @@ def plot_heatmap(linf_mean: Sequence[Sequence[float]], layers: list[int],
     masked = np.ma.masked_invalid(log_errors)
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    cmap = plt.get_cmap("viridis").copy()
+    cmap = copy.copy(plt.get_cmap("viridis"))  # .copy() needs mpl>=3.4; stay portable
     cmap.set_bad(color="lightgray")
     im = ax.imshow(masked, cmap=cmap, aspect="auto", origin="lower")
     mean_finite = masked.mean() if masked.count() else 0.0
