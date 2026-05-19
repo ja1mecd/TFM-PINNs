@@ -54,6 +54,7 @@ class PINN_L2_Minimizer:
         self.l2_errors = []
         self.best_model_state = None
         self.best_loss = float('inf')
+        self.epochs_run = 0
 
     def compute_l2_loss(self, x_batch):
         x_batch = x_batch.to(device)
@@ -157,6 +158,8 @@ class PINN_L2_Minimizer:
 
         print("-" * 50)
         print(f"Training completed! Total epochs: {actual_epochs}/{n_epochs}\n")
+        self.epochs_run = actual_epochs
+        return actual_epochs
 
 
     def get_approximant(self):
