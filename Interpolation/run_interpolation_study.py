@@ -12,6 +12,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import os
 
 import error_table_pinn as et
 import summarize_interpolation as si
@@ -20,8 +21,13 @@ import summarize_interpolation as si
 def run(*, activations, layers, neurons, epochs, n_seeds,
         collocation_points, patience, min_delta, moving_avg_window,
         linf_points, l2_points, failure_log_threshold,
-        results_dir, output_dir, summary_path, seed_base=42) -> int:
+        results_dir, output_dir, summary_path, seed_base=42,
+        resume: bool = False) -> int:
     """Run the sweep+persist for each activation, then build the summary.
+
+    With ``resume=True``, any activation whose final JSON already exists
+    in ``results_dir`` is skipped entirely, and the in-progress activation
+    picks up from its ``.partial.json`` checkpoint.
 
     Returns 0 on success. Per-seed training failures are absorbed inside
     ``error_table_pinn.run_sweep`` (sentinel + per-cell checkpoint); an
@@ -29,6 +35,10 @@ def run(*, activations, layers, neurons, epochs, n_seeds,
     uncaught so the unattended run fails loudly rather than silently.
     """
     for act in activations:
+        final_json = os.path.join(results_dir, f"error_table_pinn_{act}.json")
+        if resume and os.path.exists(final_json):
+            print(f"[resume] {act}: final JSON already present, skipping sweep")
+            continue
         args = argparse.Namespace(
             activation=act, layers=layers, neurons=neurons, epochs=epochs,
             collocation_points=collocation_points, patience=patience,
@@ -36,6 +46,7 @@ def run(*, activations, layers, neurons, epochs, n_seeds,
             linf_points=linf_points, l2_points=l2_points, n_seeds=n_seeds,
             seed_base=seed_base, failure_log_threshold=failure_log_threshold,
             results_dir=results_dir, output_dir=output_dir, output=None,
+            resume=resume,
         )
         cells = et.run_sweep(args)
         et.persist(args, cells)
@@ -65,6 +76,9 @@ def main() -> None:
     p.add_argument("--results-dir", default="results")
     p.add_argument("--output-dir", default="figures")
     p.add_argument("--summary-path", default=si.DEFAULT_OUTPUT)
+    p.add_argument("--resume", action="store_true",
+                   help="Skip activations with a final JSON and continue the "
+                        "in-progress one from its .partial.json checkpoint.")
     a = p.parse_args()
     raise SystemExit(run(
         activations=a.activations, layers=a.layers, neurons=a.neurons,
@@ -74,7 +88,7 @@ def main() -> None:
         linf_points=a.linf_points, l2_points=a.l2_points,
         failure_log_threshold=a.failure_log_threshold,
         results_dir=a.results_dir, output_dir=a.output_dir,
-        summary_path=a.summary_path,
+        summary_path=a.summary_path, resume=a.resume,
     ))
 
 

@@ -72,6 +72,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--results-dir", type=str, default="results")
     p.add_argument("--output-dir", type=str, default="figures")
     p.add_argument("--output", type=str, default=None)
+    p.add_argument("--resume", action="store_true",
+                   help="Skip (L,W,seed) cells already in the activation's "
+                        ".partial.json so an interrupted sweep can continue.")
     return p.parse_args()
 
 
@@ -84,11 +87,39 @@ def _write_partial(results_dir: str, activation: str,
         json.dump([asdict(c) for c in cells], fh, indent=2)
 
 
+def _load_partial(results_dir: str, activation: str) -> list[CellResult]:
+    """Load checkpoint cells written by `_write_partial`; [] if missing/corrupt.
+
+    Used by ``--resume`` to skip (L,W,seed) trainings already completed
+    by an interrupted sweep.
+    """
+    path = os.path.join(results_dir, f"error_table_pinn_{activation}.partial.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return [CellResult(**d) for d in json.load(fh)]
+    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+        print(f"[WARN] resume: ignoring corrupt {path}: {exc!r}")
+        return []
+
+
 def run_sweep(args: argparse.Namespace) -> list[CellResult]:
     activation_factory = ACTIVATIONS[args.activation]
     seeds = list(range(args.seed_base, args.seed_base + args.n_seeds))
     n_cells = len(args.layers) * len(args.neurons)
-    cells: list[CellResult] = []
+
+    if getattr(args, "resume", False):
+        cells: list[CellResult] = list(
+            _load_partial(args.results_dir, args.activation)
+        )
+        done_keys = {(c.layers, c.neurons, c.seed) for c in cells}
+        if cells:
+            print(f"[resume] {args.activation}: loaded {len(cells)} cell-seeds "
+                  f"from partial checkpoint; remaining will be run.")
+    else:
+        cells = []
+        done_keys = set()
 
     print(f"\nArchitecture sweep — activation: {args.activation} — "
           f"{n_cells} cells x {len(seeds)} seeds\n")
@@ -97,9 +128,16 @@ def run_sweep(args: argparse.Namespace) -> list[CellResult]:
     for n_layers in args.layers:
         for n_neurons in args.neurons:
             done += 1
+            todo_seeds = [s for s in seeds
+                          if (n_layers, n_neurons, s) not in done_keys]
+            if not todo_seeds:
+                print(f"[cell {done}/{n_cells}] L={n_layers} W={n_neurons} "
+                      f"— all {len(seeds)} seeds already in checkpoint, skipping")
+                continue
             print(f"[cell {done}/{n_cells}] L={n_layers} W={n_neurons} "
-                  f"— starting {len(seeds)} seeds")
-            for seed in seeds:
+                  f"— starting {len(todo_seeds)} seeds "
+                  f"({len(seeds) - len(todo_seeds)} skipped from checkpoint)")
+            for seed in todo_seeds:
                 t0 = time.perf_counter()
                 try:
                     set_seed(seed)
