@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
+from collections import deque
 
 import numpy as np
 import torch
@@ -177,9 +179,15 @@ class PINN_CFGS_Solver_Urban:
         mu = qmu[:, 1:2]
         return q**4 * P_qq + 2.0 * q**3 * P_q + q**2 * (1.0 - mu**2) * P_mumu
 
-    def compute_loss(self, qmu_interior: torch.Tensor, *, transform: bool):
+    def compute_loss(
+        self,
+        qmu_interior: torch.Tensor,
+        *,
+        transform: bool,
+        create_graph_second: bool = True,
+    ):
         qmu = qmu_interior.detach().clone().requires_grad_(True)
-        res = self._delta_gs(qmu, create_graph_second=True)
+        res = self._delta_gs(qmu, create_graph_second=create_graph_second)
         area = (q_max - q_min) * (mu_max - mu_min)
         J_raw = self.lambda_pde * (torch.mean(res**2) * area)
         if transform:
@@ -299,6 +307,12 @@ class PINN_CFGS_Solver_Urban:
         rad_k2: float = 1.0,
         verbose_freq: int = 200,
         diag_grid_n: int = 60,
+        diag_every: int = 0,
+        early_stop: bool = True,
+        es_patience: int = 300,
+        es_min_delta: float = 1e-4,
+        es_window: int = 20,
+        es_stop_loss: float = 0.0,
         seed: int = 5,
     ) -> None:
         if not (0.0 < train_split < 1.0):
@@ -307,6 +321,19 @@ class PINN_CFGS_Solver_Urban:
             raise ValueError("rad_resample_every must be >= 1.")
         if adam_epochs < 0 or adam_epochs > n_epochs:
             raise ValueError("0 <= adam_epochs <= n_epochs required.")
+        if diag_every < 0:
+            raise ValueError("diag_every must be >= 0.")
+        if es_patience < 1:
+            raise ValueError("es_patience must be >= 1.")
+        if es_window < 1:
+            raise ValueError("es_window must be >= 1.")
+        if es_min_delta < 0.0:
+            raise ValueError("es_min_delta must be >= 0.")
+
+        # Grid-diagnostic recompute cadence. Decoupled from verbose_freq so
+        # the trajectory curves can stay smooth without printing every step;
+        # 0 falls back to verbose_freq.
+        diag_period = diag_every if diag_every > 0 else verbose_freq
 
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -325,6 +352,16 @@ class PINN_CFGS_Solver_Urban:
 
         qmu_train, qmu_val = fresh_uniform()
 
+        # Grid diagnostics (compute_pde_l2/sol_l2/sol_rel_l2) each require a
+        # double-backward and/or full grid rebuild over diag_grid_n^2 points.
+        # Recompute them only at the verbose cadence and reuse the cached
+        # value in between, exactly as pinn_helmholtz_2d.py does — the logged
+        # arrays stay full-length and the values at the cadence (and the
+        # final value) are unchanged.
+        last_pde_l2 = float("nan")
+        last_sol_l2 = float("nan")
+        last_sol_rel_l2 = float("nan")
+
         # ---- Adam warmup (uniform sampling) ----
         for epoch in range(1, adam_epochs + 1):
             if epoch != 1 and ((epoch - 1) % rad_resample_every == 0):
@@ -334,13 +371,19 @@ class PINN_CFGS_Solver_Urban:
             self.J_train.append(J_raw)
 
             with torch.enable_grad():
-                _, J_val_raw = self.compute_loss(qmu_val, transform=False)
+                _, J_val_raw = self.compute_loss(
+                    qmu_val, transform=False, create_graph_second=False
+                )
             self.J_val.append(float(J_val_raw.item()))
             self.obj_val.append(float(J_val_raw.item()))
 
-            self.pde_l2.append(self.compute_pde_l2(n=diag_grid_n))
-            self.sol_l2.append(self.compute_sol_l2(n=diag_grid_n))
-            self.sol_rel_l2.append(self.compute_sol_rel_l2(n=diag_grid_n))
+            if epoch == 1 or epoch % diag_period == 0 or epoch == adam_epochs:
+                last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
+                last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
+                last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
+            self.pde_l2.append(last_pde_l2)
+            self.sol_l2.append(last_sol_l2)
+            self.sol_rel_l2.append(last_sol_rel_l2)
 
             if epoch % verbose_freq == 0:
                 print(
@@ -357,6 +400,22 @@ class PINN_CFGS_Solver_Urban:
         # ---- Quasi-Newton with periodic RAD resample + Cholesky-checked warm
         #      start of the inverse Hessian. ----
         qn_total = n_epochs - adam_epochs
+
+        # Early stopping on the QN phase (the expensive part: each step runs a
+        # line search with several second-order loss/grad evaluations). We
+        # monitor a moving average of the *raw* validation J — robust to the
+        # per-step noise the line search introduces — and stop when it has not
+        # improved by a relative `es_min_delta` for `es_patience` consecutive
+        # QN steps, or once it drops below the absolute `es_stop_loss` floor.
+        # Histories simply end early; the sweep's pad-and-stack handles
+        # variable-length runs and the final values are recomputed exactly at
+        # the stop point below.
+        es_hist: deque[float] = deque(maxlen=max(1, es_window))
+        es_best_ma = math.inf
+        es_bad = 0
+        es_stopped_at = 0
+        es_reason = ""
+
         for epoch in range(adam_epochs + 1, n_epochs + 1):
             qn_iter = epoch - adam_epochs
             if qn_iter != 1 and ((qn_iter - 1) % rad_resample_every == 0):
@@ -367,19 +426,29 @@ class PINN_CFGS_Solver_Urban:
                 qmu_val = self._rad_resample(
                     rad_pool_size, n_collocation - n_train, rad_k1, rad_k2
                 )
+                # The validation set just changed; the moving average must not
+                # mix J_val across two different val samples. Refill the window
+                # under the new sample before the stopping rule fires again.
+                es_hist.clear()
 
             J_obj, J_raw, alpha = self._qn_step(qmu_train)
             self.obj_train.append(J_obj)
             self.J_train.append(J_raw)
 
             with torch.enable_grad():
-                J_val_obj, J_val_raw = self.compute_loss(qmu_val, transform=True)
+                J_val_obj, J_val_raw = self.compute_loss(
+                    qmu_val, transform=True, create_graph_second=False
+                )
             self.J_val.append(float(J_val_raw.item()))
             self.obj_val.append(float(J_val_obj.item()))
 
-            self.pde_l2.append(self.compute_pde_l2(n=diag_grid_n))
-            self.sol_l2.append(self.compute_sol_l2(n=diag_grid_n))
-            self.sol_rel_l2.append(self.compute_sol_rel_l2(n=diag_grid_n))
+            if qn_iter == 1 or epoch % diag_period == 0 or epoch == n_epochs:
+                last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
+                last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
+                last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
+            self.pde_l2.append(last_pde_l2)
+            self.sol_l2.append(last_sol_l2)
+            self.sol_rel_l2.append(last_sol_rel_l2)
 
             if epoch % verbose_freq == 0 or epoch == n_epochs:
                 d = self.qn.diagnostics()
@@ -393,7 +462,45 @@ class PINN_CFGS_Solver_Urban:
                     f"resets={d['n_resets']} ls_fail={d['n_ls_failures']}"
                 )
 
+            if early_stop:
+                jv = self.J_val[-1]
+                es_hist.append(jv)
+                if es_stop_loss > 0.0 and math.isfinite(jv) and jv <= es_stop_loss:
+                    es_reason = f"J_val={jv:.3e} <= stop_loss={es_stop_loss:.1e}"
+                    es_stopped_at = epoch
+                elif len(es_hist) == es_hist.maxlen:
+                    ma = sum(es_hist) / len(es_hist)
+                    if math.isfinite(ma) and ma < es_best_ma * (1.0 - es_min_delta):
+                        es_best_ma = ma
+                        es_bad = 0
+                    else:
+                        es_bad += 1
+                        if es_bad >= es_patience:
+                            es_reason = (
+                                f"no >{es_min_delta:.1e} rel. improvement in "
+                                f"MA(J_val, w={es_window}) for {es_patience} steps "
+                                f"(MA={ma:.3e}, best={es_best_ma:.3e})"
+                            )
+                            es_stopped_at = epoch
+
+                if es_stopped_at:
+                    # Recompute exact diagnostics at the stop point so the
+                    # final logged sol/pde L2 are not stale cached values.
+                    self.pde_l2[-1] = self.compute_pde_l2(n=diag_grid_n)
+                    self.sol_l2[-1] = self.compute_sol_l2(n=diag_grid_n)
+                    self.sol_rel_l2[-1] = self.compute_sol_rel_l2(n=diag_grid_n)
+                    print(
+                        f"[QN] early stop at epoch {epoch} "
+                        f"({epoch - adam_epochs}/{qn_total}): {es_reason}"
+                    )
+                    break
+
         print("-" * 60)
+        if early_stop and es_stopped_at:
+            print(
+                f"Early stopped after {es_stopped_at - adam_epochs} of "
+                f"{qn_total} QN steps (saved {n_epochs - es_stopped_at} steps)."
+            )
         d = self.qn.diagnostics()
         print(
             f"Final: J_raw={self.J_train[-1]:.4e}, J_val={self.J_val[-1]:.4e}, "
@@ -537,8 +644,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rad-k2", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=5)
     p.add_argument("--diag-grid-n", type=int, default=60)
+    p.add_argument(
+        "--diag-every", type=int, default=0,
+        help="Grid-diagnostic recompute cadence (epochs). 0 -> use verbose-freq.",
+    )
     p.add_argument("--H-on-cpu", action="store_true")
+    p.add_argument(
+        "--no-early-stop", dest="early_stop", action="store_false",
+        help="Disable QN-phase early stopping (run the full fixed budget).",
+    )
+    p.add_argument("--es-patience", type=int, default=300)
+    p.add_argument("--es-min-delta", type=float, default=1e-4)
+    p.add_argument("--es-window", type=int, default=20)
+    p.add_argument(
+        "--es-stop-loss", type=float, default=0.0,
+        help="Absolute J_val floor; stop once reached. <=0 disables.",
+    )
     p.add_argument("--run-tag", default=None)
+    p.set_defaults(early_stop=True)
     return p.parse_args()
 
 
@@ -570,6 +693,12 @@ def main() -> None:
         rad_k2=args.rad_k2,
         seed=args.seed,
         diag_grid_n=args.diag_grid_n,
+        diag_every=args.diag_every,
+        early_stop=args.early_stop,
+        es_patience=args.es_patience,
+        es_min_delta=args.es_min_delta,
+        es_window=args.es_window,
+        es_stop_loss=args.es_stop_loss,
     )
 
     run_tag = args.run_tag or time.strftime("%Y%m%d_%H%M%S")

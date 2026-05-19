@@ -86,6 +86,12 @@ def run_one(
     rad_k2: float,
     initial_scale: bool,
     h_on_cpu: bool,
+    diag_every: int,
+    early_stop: bool,
+    es_patience: int,
+    es_min_delta: float,
+    es_window: int,
+    es_stop_loss: float,
 ) -> SeedResult:
     # Seed before model construction so weight init is reproducible per seed;
     # train() re-seeds the data sampling with the same value internally.
@@ -115,6 +121,12 @@ def run_one(
         rad_k2=rad_k2,
         verbose_freq=max(1, n_epochs // 5),
         diag_grid_n=60,
+        diag_every=diag_every,
+        early_stop=early_stop,
+        es_patience=es_patience,
+        es_min_delta=es_min_delta,
+        es_window=es_window,
+        es_stop_loss=es_stop_loss,
         seed=seed,
     )
     return SeedResult(
@@ -143,6 +155,12 @@ def run_sweep(
     rad_k2: float,
     initial_scale: bool,
     h_on_cpu: bool,
+    diag_every: int,
+    early_stop: bool,
+    es_patience: int,
+    es_min_delta: float,
+    es_window: int,
+    es_stop_loss: float,
 ) -> tuple[LambdaResult, ...]:
     out: list[LambdaResult] = []
     for lam in lambdas:
@@ -161,6 +179,12 @@ def run_sweep(
                 rad_k1=rad_k1, rad_k2=rad_k2,
                 initial_scale=initial_scale,
                 h_on_cpu=h_on_cpu,
+                diag_every=diag_every,
+                early_stop=early_stop,
+                es_patience=es_patience,
+                es_min_delta=es_min_delta,
+                es_window=es_window,
+                es_stop_loss=es_stop_loss,
             ))
         out.append(LambdaResult(lambda_=lam, seeds=tuple(seed_runs)))
     return tuple(out)
@@ -321,8 +345,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--hidden", type=int, nargs="+", default=[30])
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--initial-scale", action="store_true")
+    p.add_argument(
+        "--diag-every", type=int, default=100,
+        help="Grid-diagnostic recompute cadence in epochs (pde/sol L2). "
+             "Keeps trajectory curves smooth while skipping most steps. "
+             "0 -> fall back to the (coarse) verbose cadence.",
+    )
     p.add_argument("--H-on-cpu", action="store_true")
+    p.add_argument(
+        "--no-early-stop", dest="early_stop", action="store_false",
+        help="Disable QN-phase early stopping (run the full fixed budget). "
+             "Early stopping is ON by default to keep the sweep tractable.",
+    )
+    p.add_argument(
+        "--es-patience", type=int, default=300,
+        help="QN steps without a relative MA(J_val) improvement before stopping.",
+    )
+    p.add_argument(
+        "--es-min-delta", type=float, default=1e-4,
+        help="Required relative improvement of MA(J_val) to reset patience.",
+    )
+    p.add_argument(
+        "--es-window", type=int, default=20,
+        help="Moving-average window over J_val used by the stopping rule.",
+    )
+    p.add_argument(
+        "--es-stop-loss", type=float, default=0.0,
+        help="Absolute J_val floor; stop once reached. <=0 disables.",
+    )
     p.add_argument("--results-dir", type=str, default=os.path.join("..", "results"))
+    p.set_defaults(early_stop=True)
     return p.parse_args(argv)
 
 
@@ -363,6 +415,12 @@ def main(argv: list[str] | None = None) -> None:
         rad_k1=args.rad_k1, rad_k2=args.rad_k2,
         initial_scale=args.initial_scale,
         h_on_cpu=args.H_on_cpu,
+        diag_every=args.diag_every,
+        early_stop=args.early_stop,
+        es_patience=args.es_patience,
+        es_min_delta=args.es_min_delta,
+        es_window=args.es_window,
+        es_stop_loss=args.es_stop_loss,
     )
 
     write_summary(
