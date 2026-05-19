@@ -110,3 +110,37 @@ def aggregate(
         cells=tuple(cells),
         created_utc=datetime.now(timezone.utc).isoformat(),
     )
+
+
+def _tuplify(x):
+    if isinstance(x, list):
+        return tuple(_tuplify(v) for v in x)
+    return x
+
+
+def save_json(sweep: SweepResult, path: str) -> None:
+    payload = asdict(sweep)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+
+
+def load_json(path: str) -> SweepResult:
+    with open(path, encoding="utf-8") as fh:
+        d = json.load(fh)
+    cells = tuple(CellResult(**c) for c in d["cells"])
+    return SweepResult(
+        activation=d["activation"],
+        layers=tuple(d["layers"]),
+        neurons=tuple(d["neurons"]),
+        seeds=tuple(d["seeds"]),
+        failure_log_threshold=d["failure_log_threshold"],
+        machine_eps=d["machine_eps"],
+        linf_mean=_tuplify(d["linf_mean"]),
+        linf_std=_tuplify(d["linf_std"]),
+        l2_mean=_tuplify(d["l2_mean"]),
+        l2_std=_tuplify(d["l2_std"]),
+        time_mean=_tuplify(d["time_mean"]),
+        n_failed=_tuplify(d["n_failed"]),
+        cells=cells,
+        created_utc=d["created_utc"],
+    )

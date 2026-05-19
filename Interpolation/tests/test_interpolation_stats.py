@@ -3,6 +3,7 @@ import math
 import pytest
 
 from interpolation_stats import CellResult, SweepResult, aggregate
+from interpolation_stats import save_json, load_json
 
 
 def _cells_two_by_one():
@@ -68,3 +69,16 @@ def test_aggregate_handles_zero_linf_without_crashing():
     # mean linf == 0 -> clamped to machine_eps; log10(1.19e-7) < -0.5
     # so the cell is NOT flagged as failed.
     assert sweep.n_failed[0][0] == 0
+
+
+@pytest.mark.unit
+def test_json_round_trip(tmp_path):
+    sweep = aggregate(
+        activation="ReLU", layers=[1], neurons=[5],
+        cells=_cells_two_by_one(),
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+    )
+    path = tmp_path / "relu.json"
+    save_json(sweep, str(path))
+    loaded = load_json(str(path))
+    assert loaded == sweep
