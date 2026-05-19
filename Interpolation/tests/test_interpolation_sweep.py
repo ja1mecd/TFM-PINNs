@@ -97,3 +97,33 @@ def test_run_sweep_isolates_training_failures(tmp_path, monkeypatch):
     assert os.path.exists(
         os.path.join(args.results_dir, "error_table_pinn_Tanh.partial.json")
     )
+
+
+@pytest.mark.integration
+def test_summarize_builds_latex_from_jsons(tmp_path):
+    from interpolation_stats import CellResult, aggregate, save_json
+    import summarize_interpolation as si
+
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    for act in ("Tanh", "ReLU"):
+        cells = [
+            CellResult(layers=1, neurons=5, seed=42, linf=1e-2, l2=2e-3,
+                       train_time_s=1.0, epochs_run=10),
+            CellResult(layers=1, neurons=5, seed=43, linf=3e-2, l2=4e-3,
+                       train_time_s=1.0, epochs_run=10),
+        ]
+        sw = aggregate(activation=act, layers=[1], neurons=[5], cells=cells,
+                       failure_log_threshold=-0.5, machine_eps=1e-7)
+        save_json(sw, str(results_dir / f"error_table_pinn_{act}.json"))
+
+    out = tmp_path / "interpolation_summary.tex"
+    si.build_summary(
+        results_dir=str(results_dir),
+        activations=["Tanh", "Sigmoid", "ReLU", "Softmax"],
+        output_path=str(out),
+    )
+    text = out.read_text()
+    assert r"\begin{tabular}" in text
+    assert "Tanh" in text and "ReLU" in text
+    assert "Sigmoid" not in text  # JSON absent -> skipped, not crashed
