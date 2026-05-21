@@ -1072,8 +1072,8 @@ HELMHOLTZ_CONFIGS: dict[str, dict] = {
         "a2": 4,
         "k": 1.0,
         "hidden_layers": (20, 20),
-        "n_epochs": 20000,
-        "adam_epochs": 5000,
+        "n_epochs": 10000,
+        "adam_epochs": 2000,
         "n_collocation": 10000,
     },
     "high": {
@@ -1081,8 +1081,8 @@ HELMHOLTZ_CONFIGS: dict[str, dict] = {
         "a2": 6,
         "k": 1.0,
         "hidden_layers": (30, 30, 30),
-        "n_epochs": 50000,
-        "adam_epochs": 5000,
+        "n_epochs": 20000,
+        "adam_epochs": 2000,
         "n_collocation": 10000,
     },
 }
