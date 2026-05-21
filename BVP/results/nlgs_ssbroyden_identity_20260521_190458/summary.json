@@ -1,0 +1,47 @@
+{
+  "problem": "NLGS (Urban et al. 2025, sec. 4.2)",
+  "qn_variant": "ssbroyden",
+  "loss_transform": "identity",
+  "loss_lambda": 0.5,
+  "loss_eps": 1e-12,
+  "lambda_pde": 1.0,
+  "lambda_history": [],
+  "b_coeffs": [
+    1.0,
+    0.6,
+    0.4,
+    0.3,
+    0.2,
+    0.15,
+    0.1,
+    0.08
+  ],
+  "toroidal_s": 1.0,
+  "toroidal_Pc": 0.05,
+  "toroidal_sigma": 2.0,
+  "domain": {
+    "q": [
+      0.0,
+      1.0
+    ],
+    "mu": [
+      -1.0,
+      1.0
+    ]
+  },
+  "n_epochs_run": 4135,
+  "best_val_objective_ma": 0.000435725215356797,
+  "final_obj_train": 0.00038341619074344635,
+  "final_obj_val": 0.00045696241431869566,
+  "final_J_train": 0.00038341619074344635,
+  "final_J_val": 0.00045696241431869566,
+  "final_pde_l2": 0.020260598904856108,
+  "final_sol_l2": 0.2847005116499365,
+  "final_sol_rel_l2": 0.45587175877593944,
+  "max_abs_err": 0.7706712484359741,
+  "mean_abs_err": 0.12299010902643204,
+  "device": "cuda",
+  "torch_version": "1.13.1+cu117",
+  "run_name": "nlgs_ssbroyden_identity_20260521_190458",
+  "run_tag": "20260521_190458"
+}
