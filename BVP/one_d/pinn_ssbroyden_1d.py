@@ -34,9 +34,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
+from collections import deque
 
 import numpy as np
 import torch
@@ -249,6 +251,14 @@ class PINN_BVP_SSBroyden:
         scheduler_threshold: float = 1e-4,
         scheduler_gamma: float = 0.9,
         scheduler_min_lr: float = 1e-6,
+        # QN-phase early stopping (urban-style relative-MA criterion). Active
+        # only after the fixed Adam warm-up (epoch > adam_epochs), so it never
+        # cuts the warm-up short and is inert for pure-Adam runs (no QN phase).
+        early_stop: bool = True,
+        es_patience: int = 300,
+        es_window: int = 20,
+        es_min_delta: float = 1e-4,
+        es_stop_loss: float = 0.0,
     ) -> None:
         print(
             "\nTraining 1D PINN: -u'' = (k pi)^2 sin(k pi x), "
@@ -311,6 +321,13 @@ class PINN_BVP_SSBroyden:
         last_sol = np.nan
         last_rel = np.nan
 
+        # QN-phase early-stop detector (urban-style relative-MA on raw val J).
+        es_hist: "deque[float]" = deque(maxlen=es_window)
+        es_best_ma = float("inf")
+        es_bad = 0
+        es_stopped_at = None
+        es_reason = ""
+
         for epoch in range(1, n_epochs + 1):
             if epoch != 1 and ((epoch - 1) % resample_every == 0):
                 x_train, x_val = resample_block()
@@ -370,11 +387,12 @@ class PINN_BVP_SSBroyden:
 
             sch.step(float(val_obj.item()))
 
-            if epoch == 1 or (epoch % verbose_freq == 0):
-                last_pde = self.compute_pde_l2(n=diag_grid_n)
-                last_sol = self.compute_sol_l2(n=diag_grid_n)
-                last_rel = self.compute_sol_rel_l2(n=diag_grid_n)
-
+            # Diagnostics every epoch (printing stays throttled below). The old
+            # every-verbose_freq sampling produced a coarse solution-error
+            # staircase in the convergence plots.
+            last_pde = self.compute_pde_l2(n=diag_grid_n)
+            last_sol = self.compute_sol_l2(n=diag_grid_n)
+            last_rel = self.compute_sol_rel_l2(n=diag_grid_n)
             self.pde_l2.append(last_pde)
             self.sol_l2.append(last_sol)
             self.sol_rel_l2.append(last_rel)
@@ -399,10 +417,41 @@ class PINN_BVP_SSBroyden:
                 )
                 break
 
+            # QN-phase early stopping (urban-style relative-MA criterion). Gated
+            # on `not use_adam`, so it only ends the quasi-Newton phase once it
+            # has converged; inert during the Adam warm-up and for pure-Adam.
+            if early_stop and not use_adam:
+                jv = float(val_raw.item())
+                es_hist.append(jv)
+                if es_stop_loss > 0.0 and math.isfinite(jv) and jv <= es_stop_loss:
+                    es_reason = f"J_val={jv:.3e} <= stop_loss={es_stop_loss:.1e}"
+                    es_stopped_at = epoch
+                elif len(es_hist) == es_hist.maxlen:
+                    ma = float(np.mean(es_hist))
+                    if math.isfinite(ma) and ma < es_best_ma * (1.0 - es_min_delta):
+                        es_best_ma = ma
+                        es_bad = 0
+                    else:
+                        es_bad += 1
+                        if es_bad >= es_patience:
+                            es_reason = (
+                                f"no >{es_min_delta:.1e} rel. improvement in "
+                                f"MA(J_val, w={es_window}) for {es_patience} "
+                                f"epochs (MA={ma:.3e}, best={es_best_ma:.3e})"
+                            )
+                            es_stopped_at = epoch
+                if es_stopped_at is not None:
+                    print(
+                        f"  [QN early stop] epoch {epoch} "
+                        f"({epoch - adam_epochs} QN steps): {es_reason}"
+                    )
+                    break
+
         if self.best_state is not None:
             self.model.load_state_dict(self.best_state)
         print("-" * 72)
         print(f"Done. Best val objective moving average: {self.best_val_ma:.6e}")
+        self.es_stopped_at = es_stopped_at
 
     # ---- plotting ----
     def plot_results(

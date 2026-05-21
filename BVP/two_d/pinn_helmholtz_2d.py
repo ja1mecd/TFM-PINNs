@@ -43,9 +43,11 @@ catastrophic cancellation for small |lambda|.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
+from collections import deque
 import numpy as np
 import torch
 import torch.nn as nn
@@ -463,7 +465,7 @@ class PINN_Helmholtz_Solver:
         n_collocation: int = 8000,
         train_split: float = 0.8,
         resample_every: int = 500,
-        adam_epochs: int = 10000,
+        adam_epochs: int = 2000,
         verbose_freq: int = 500,
         diag_grid_n: int = 60,
         # Early stopping is now QN-phase-only; an Adam plateau cannot
@@ -473,6 +475,13 @@ class PINN_Helmholtz_Solver:
         patience: int = 500,
         min_delta: float = 1e-10,
         moving_avg_window: int = 20,
+        # QN-phase early stopping (urban-style relative-MA criterion), used on
+        # the standard (non-schedule) path. Active only after handover.
+        early_stop: bool = True,
+        es_patience: int = 300,
+        es_window: int = 20,
+        es_min_delta: float = 1e-4,
+        es_stop_loss: float = 0.0,
         # Adaptive Adam -> QN handover. With "plateau" the run switches to
         # the quasi-Newton optimiser the first time the validation J fails
         # to improve by `plateau_min_delta` over `plateau_patience`
@@ -480,7 +489,7 @@ class PINN_Helmholtz_Solver:
         # comes first). "fixed" recovers the legacy schedule (switch at
         # exactly `adam_epochs`); the loss-schedule machinery is only
         # supported in that mode.
-        handover_strategy: str = "plateau",
+        handover_strategy: str = "fixed",
         handover_max_adam_epochs: int = 10000,
         plateau_patience: int = 200,
         plateau_min_delta: float = 1e-4,
@@ -631,6 +640,13 @@ class PINN_Helmholtz_Solver:
         last_sol_rel_l2 = np.nan
 
         skip_remaining = 0  # set by the trial scan to absorb the next K-1 iterations
+
+        # QN-phase early-stop detector (urban-style relative-MA on raw val J).
+        es_hist: "deque[float]" = deque(maxlen=es_window)
+        es_best_ma = float("inf")
+        es_bad = 0
+        es_stopped_at = None
+        es_reason = ""
 
         for epoch in range(1, n_epochs + 1):
             if skip_remaining > 0:
@@ -803,6 +819,9 @@ class PINN_Helmholtz_Solver:
                     self.best_state = None
                     ma_buf = []
                     epochs_no_improve = 0
+                    es_hist.clear()
+                    es_best_ma = float("inf")
+                    es_bad = 0
                     print(
                         f"  [handover] epoch {epoch}: Adam -> "
                         f"{self.quasi_newton.param_groups[0]['variant'].upper()} "
@@ -829,13 +848,34 @@ class PINN_Helmholtz_Solver:
                 else:
                     epochs_no_improve += 1
 
+                # Urban-style relative-MA early-stop counter (raw val J).
+                if early_stop:
+                    jv = float(val_raw.item())
+                    es_hist.append(jv)
+                    if es_stop_loss > 0.0 and math.isfinite(jv) and jv <= es_stop_loss:
+                        es_reason = f"J_val={jv:.3e} <= stop_loss={es_stop_loss:.1e}"
+                        es_stopped_at = epoch
+                    elif len(es_hist) == es_hist.maxlen:
+                        ma = float(np.mean(es_hist))
+                        if math.isfinite(ma) and ma < es_best_ma * (1.0 - es_min_delta):
+                            es_best_ma = ma
+                            es_bad = 0
+                        else:
+                            es_bad += 1
+                            if es_bad >= es_patience:
+                                es_reason = (
+                                    f"no >{es_min_delta:.1e} rel. improvement in "
+                                    f"MA(J_val, w={es_window}) for {es_patience} "
+                                    f"epochs (MA={ma:.3e}, best={es_best_ma:.3e})"
+                                )
+                                es_stopped_at = epoch
+
             sch.step(float(val_obj.item()))
 
-            if epoch == 1 or (epoch % verbose_freq == 0):
-                last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
-                last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
-                last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
-
+            # Diagnostics every epoch (printing throttled by verbose_freq).
+            last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
+            last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
+            last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
             self.pde_l2.append(last_pde_l2)
             self.sol_l2.append(last_sol_l2)
             self.sol_rel_l2.append(last_sol_rel_l2)
@@ -853,8 +893,17 @@ class PINN_Helmholtz_Solver:
                     f"relSolL2={last_sol_rel_l2:.3e} | lr={lr_now:.2e}"
                 )
 
-            # Early stop only fires AFTER handover, so a stalled Adam phase
-            # cannot terminate the run before SSBroyden engages.
+            # QN-phase early stopping. The urban-style relative-MA criterion is
+            # the primary trigger on the standard path; the legacy absolute-MA
+            # counter remains as a backstop (and covers the phase_ab schedule
+            # path, where the urban counter is not advanced).
+            if es_stopped_at is not None:
+                n_qn = epoch - (self.handover_epoch or adam_epochs)
+                print(
+                    f"  [QN early stop] epoch {epoch} ({n_qn} QN steps): "
+                    f"{es_reason}"
+                )
+                break
             if handover_done and epochs_no_improve >= patience:
                 print(
                     f"Early stopping at epoch {epoch} "

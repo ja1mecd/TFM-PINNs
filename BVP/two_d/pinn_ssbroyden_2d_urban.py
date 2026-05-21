@@ -377,10 +377,10 @@ class PINN_CFGS_Solver_Urban:
             self.J_val.append(float(J_val_raw.item()))
             self.obj_val.append(float(J_val_raw.item()))
 
-            if epoch == 1 or epoch % diag_period == 0 or epoch == adam_epochs:
-                last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
-                last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
-                last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
+            # Diagnostics every epoch (printing throttled by verbose_freq).
+            last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
+            last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
+            last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
             self.pde_l2.append(last_pde_l2)
             self.sol_l2.append(last_sol_l2)
             self.sol_rel_l2.append(last_sol_rel_l2)
@@ -442,10 +442,10 @@ class PINN_CFGS_Solver_Urban:
             self.J_val.append(float(J_val_raw.item()))
             self.obj_val.append(float(J_val_obj.item()))
 
-            if qn_iter == 1 or epoch % diag_period == 0 or epoch == n_epochs:
-                last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
-                last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
-                last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
+            # Diagnostics every epoch (printing throttled by verbose_freq).
+            last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
+            last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
+            last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
             self.pde_l2.append(last_pde_l2)
             self.sol_l2.append(last_sol_l2)
             self.sol_rel_l2.append(last_sol_rel_l2)

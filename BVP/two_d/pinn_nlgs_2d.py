@@ -63,9 +63,11 @@ that avoids catastrophic cancellation for small |lambda|.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
+from collections import deque
 import numpy as np
 import torch
 import torch.nn as nn
@@ -568,12 +570,19 @@ class PINN_NLGS_Solver:
         n_collocation: int = 1000,
         train_split: float = 0.8,
         resample_every: int = 500,
-        adam_epochs: int = 10000,
+        adam_epochs: int = 2000,
         verbose_freq: int = 200,
         diag_grid_n: int = 60,
         patience: int = 20000,
         min_delta: float = 1e-10,
         moving_avg_window: int = 20,
+        # QN-phase early stopping (urban-style relative-MA criterion). Active
+        # only after the fixed Adam warm-up (epoch > adam_epochs).
+        early_stop: bool = True,
+        es_patience: int = 300,
+        es_window: int = 20,
+        es_min_delta: float = 1e-4,
+        es_stop_loss: float = 0.0,
         scheduler_patience: int = 300,
         scheduler_threshold: float = 1e-4,
         scheduler_gamma: float = 0.9,
@@ -686,6 +695,13 @@ class PINN_NLGS_Solver:
         last_sol_rel_l2 = np.nan
 
         skip_remaining = 0  # set by the trial scan to absorb the next K-1 iterations
+
+        # QN-phase early-stop detector (urban-style relative-MA on raw val J).
+        es_hist: "deque[float]" = deque(maxlen=es_window)
+        es_best_ma = float("inf")
+        es_bad = 0
+        es_stopped_at = None
+        es_reason = ""
 
         for epoch in range(1, n_epochs + 1):
             if skip_remaining > 0:
@@ -827,13 +843,34 @@ class PINN_NLGS_Solver:
             else:
                 epochs_no_improve += 1
 
+            # Urban-style relative-MA early-stop counter (raw val J), QN-only.
+            if early_stop and not use_adam:
+                jv = float(val_raw.item())
+                es_hist.append(jv)
+                if es_stop_loss > 0.0 and math.isfinite(jv) and jv <= es_stop_loss:
+                    es_reason = f"J_val={jv:.3e} <= stop_loss={es_stop_loss:.1e}"
+                    es_stopped_at = epoch
+                elif len(es_hist) == es_hist.maxlen:
+                    ma = float(np.mean(es_hist))
+                    if math.isfinite(ma) and ma < es_best_ma * (1.0 - es_min_delta):
+                        es_best_ma = ma
+                        es_bad = 0
+                    else:
+                        es_bad += 1
+                        if es_bad >= es_patience:
+                            es_reason = (
+                                f"no >{es_min_delta:.1e} rel. improvement in "
+                                f"MA(J_val, w={es_window}) for {es_patience} "
+                                f"epochs (MA={ma:.3e}, best={es_best_ma:.3e})"
+                            )
+                            es_stopped_at = epoch
+
             sch.step(float(val_obj.item()))
 
-            if epoch == 1 or (epoch % verbose_freq == 0):
-                last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
-                last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
-                last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
-
+            # Diagnostics every epoch (printing throttled by verbose_freq).
+            last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)
+            last_sol_l2 = self.compute_sol_l2(n=diag_grid_n)
+            last_sol_rel_l2 = self.compute_sol_rel_l2(n=diag_grid_n)
             self.pde_l2.append(last_pde_l2)
             self.sol_l2.append(last_sol_l2)
             self.sol_rel_l2.append(last_sol_rel_l2)
@@ -851,6 +888,13 @@ class PINN_NLGS_Solver:
                     f"relSolL2={last_sol_rel_l2:.3e} | lr={lr_now:.2e}"
                 )
 
+            # QN-phase early stopping (urban-style; fires only after warm-up).
+            if es_stopped_at is not None:
+                print(
+                    f"  [QN early stop] epoch {epoch} "
+                    f"({epoch - adam_epochs} QN steps): {es_reason}"
+                )
+                break
             if epochs_no_improve >= patience:
                 print(
                     f"Early stopping at epoch {epoch} "
@@ -1084,17 +1128,18 @@ def main() -> None:
         toroidal_sigma=T_SIGMA,
     )
 
-    # Table 1 NLGS: 20 000 total iterations, 10 000 Adam, batch size 8000,
-    # training set refreshed every 500 iterations.
+    # Standardised optimiser protocol: fixed 2000-epoch Adam warm-up, then QN
+    # with urban-style early stopping (generous 8000-epoch cap). batch size
+    # 8000, training set refreshed every 500 iterations.
     pinn.train(
-        n_epochs=20000,
+        n_epochs=10000,
         n_collocation=8000,
         train_split=0.8,
         resample_every=500,
-        adam_epochs=10000,
+        adam_epochs=2000,
         verbose_freq=500,
         diag_grid_n=60,
-        patience=20000,      # disable early stop — match paper's fixed budget
+        patience=20000,      # legacy both-phase counter disabled; QN ES via es_*
         min_delta=1e-10,
         moving_avg_window=20,
         loss_lambda_schedule=loss_lambda_schedule,

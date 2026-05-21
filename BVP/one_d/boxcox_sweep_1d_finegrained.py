@@ -359,6 +359,20 @@ def _log_safe_yerr(
     return np.vstack([lo, hi])
 
 
+def _stack_ffill(histories: list[np.ndarray]) -> np.ndarray:
+    """Stack ragged per-seed histories, forward-filling each short run's final
+    (converged) value out to the longest length. QN-phase early stopping makes
+    seeds terminate at different epochs; holding the converged value is the
+    honest representation for a convergence curve."""
+    max_len = max(h.size for h in histories)
+    out = np.empty((len(histories), max_len), dtype=np.float64)
+    for i, h in enumerate(histories):
+        out[i, : h.size] = h
+        if h.size < max_len:
+            out[i, h.size:] = h[-1]
+    return out
+
+
 def plot_sweep(
     results: tuple[LambdaResult, ...],
     out_path: str,
@@ -394,10 +408,10 @@ def plot_sweep(
             ax[0, 1].plot([], [], color=c, linewidth=1.3,
                           label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
             continue
-        H = np.stack([s.J_val_history for s in succ], axis=0)
+        H = _stack_ffill([s.J_val_history for s in succ])
         ax[0, 0].semilogy(np.mean(H, axis=0), color=c, linewidth=1.3,
                           label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
-        S = np.stack([s.sol_l2_history for s in succ], axis=0)
+        S = _stack_ffill([s.sol_l2_history for s in succ])
         ax[0, 1].semilogy(np.mean(S, axis=0), color=c, linewidth=1.3,
                           label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
 
@@ -621,15 +635,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=5000,
                    help="Total epochs (matches the thesis 4.2 budget).")
     p.add_argument("--adam-epochs", type=int, default=2000,
-                   help="Used only when --handover-strategy=fixed.")
+                   help="Fixed Adam warm-up length; handover to QN at this "
+                        "epoch (standardised 2000-epoch convention).")
     p.add_argument(
         "--handover-strategy",
         type=str,
-        default="plateau",
+        default="fixed",
         choices=list(HANDOVER_STRATEGIES),
-        help="When Adam hands over to the QN optimiser. plateau (default) "
-             "switches once val J stops improving by --plateau-min-delta over "
-             "the last --plateau-patience epochs, capped at --handover-max-adam-epochs.",
+        help="When Adam hands over to the QN optimiser. Default 'fixed': "
+             "always switch at exactly --adam-epochs so every seed shares an "
+             "identical Adam phase and the dashed handover line is meaningful.",
     )
     p.add_argument("--handover-max-adam-epochs", type=int, default=10000)
     p.add_argument("--plateau-patience", type=int, default=200)

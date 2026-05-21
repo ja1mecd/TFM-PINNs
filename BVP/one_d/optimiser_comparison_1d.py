@@ -120,6 +120,11 @@ def run_pipeline_once(
     plateau_patience: int,
     plateau_min_delta: float,
     patience: int,
+    early_stop: bool = True,
+    es_patience: int = 300,
+    es_window: int = 20,
+    es_min_delta: float = 1e-4,
+    es_stop_loss: float = 0.0,
 ) -> SeedRun:
     if pipeline not in PIPELINES:
         raise ValueError(f"unknown pipeline {pipeline!r}; valid: {PIPELINES}")
@@ -178,6 +183,11 @@ def run_pipeline_once(
             handover_max_adam_epochs=handover_max_adam_epochs,
             plateau_patience=plateau_patience,
             plateau_min_delta=plateau_min_delta,
+            early_stop=early_stop,
+            es_patience=es_patience,
+            es_window=es_window,
+            es_min_delta=es_min_delta,
+            es_stop_loss=es_stop_loss,
         )
 
     return SeedRun(
@@ -208,6 +218,11 @@ def run_comparison(
     plateau_patience: int,
     plateau_min_delta: float,
     patience: int,
+    early_stop: bool = True,
+    es_patience: int = 300,
+    es_window: int = 20,
+    es_min_delta: float = 1e-4,
+    es_stop_loss: float = 0.0,
 ) -> tuple[PipelineResult, ...]:
     results: list[PipelineResult] = []
     for p in pipelines:
@@ -228,6 +243,11 @@ def run_comparison(
                 plateau_patience=plateau_patience,
                 plateau_min_delta=plateau_min_delta,
                 patience=patience,
+                early_stop=early_stop,
+                es_patience=es_patience,
+                es_window=es_window,
+                es_min_delta=es_min_delta,
+                es_stop_loss=es_stop_loss,
             )
             runs.append(run)
         results.append(PipelineResult(pipeline=p, seeds=tuple(runs)))
@@ -244,6 +264,26 @@ def _partition_runs(
     succ = tuple(s for s in r.seeds if is_successful(s, rel_l2_threshold))
     fail = tuple(s for s in r.seeds if not is_successful(s, rel_l2_threshold))
     return succ, fail
+
+
+def _stack_ffill(histories: list[np.ndarray]) -> np.ndarray:
+    """Stack per-seed histories of (possibly) different lengths into one array.
+
+    QN-phase early stopping makes seeds terminate at different epochs, so the
+    raw histories are ragged. Each short history is forward-filled with its
+    final (converged) value out to the longest length, which is the honest
+    representation for a convergence curve: an early-stopped run simply stays
+    at the value it converged to. NOTE: the mean/IQR aggregation downstream is
+    still the naive linear-mean-on-log scheme and is slated for a robust
+    redesign once the re-run data is in.
+    """
+    max_len = max(h.size for h in histories)
+    out = np.empty((len(histories), max_len), dtype=np.float64)
+    for i, h in enumerate(histories):
+        out[i, : h.size] = h
+        if h.size < max_len:
+            out[i, h.size:] = h[-1]
+    return out
 
 
 def plot_comparison(
@@ -285,7 +325,7 @@ def plot_comparison(
             )
             continue
 
-        H = np.stack([s.J_val_history for s in succ], axis=0)
+        H = _stack_ffill([s.J_val_history for s in succ])
         mean = np.mean(H, axis=0)
         lo = np.quantile(H, 0.25, axis=0)
         hi = np.quantile(H, 0.75, axis=0)
@@ -296,7 +336,7 @@ def plot_comparison(
         )
         ax[0, 0].fill_between(epochs, lo, hi, color=c, alpha=0.15)
 
-        S = np.stack([s.sol_l2_history for s in succ], axis=0)
+        S = _stack_ffill([s.sol_l2_history for s in succ])
         smean = np.mean(S, axis=0)
         slo = np.quantile(S, 0.25, axis=0)
         shi = np.quantile(S, 0.75, axis=0)
@@ -306,7 +346,8 @@ def plot_comparison(
         )
         ax[0, 1].fill_between(epochs, slo, shi, color=c, alpha=0.15)
 
-    ax[0, 0].axvline(adam_warmup, color="k", linestyle=":", alpha=0.5, label="warm-up boundary")
+    ax[0, 0].axvline(adam_warmup, color="k", linestyle=":", alpha=0.5,
+                     label=f"Adam$\\to$QN handover (epoch {adam_warmup})")
     ax[0, 0].set_xlabel("Epoch")
     ax[0, 0].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$ (mean, IQR shaded)")
     ax[0, 0].set_title(
@@ -541,21 +582,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Matches the thesis 4.2 budget; SSBroyden corrupts H "
                         "on much longer horizons.")
     p.add_argument("--adam-warmup", type=int, default=2000,
-                   help="Used only when --handover-strategy=fixed.")
+                   help="Fixed Adam warm-up length; handover to QN at this "
+                        "epoch (the standardised 2000-epoch convention).")
     p.add_argument(
         "--handover-strategy",
         type=str,
-        default="plateau",
+        default="fixed",
         choices=list(HANDOVER_STRATEGIES),
+        help="Default 'fixed': always hand over at exactly --adam-warmup "
+             "epochs so the dashed warm-up line is meaningful and all seeds "
+             "share an identical Adam phase.",
     )
     p.add_argument("--handover-max-adam-epochs", type=int, default=10000)
     p.add_argument("--plateau-patience", type=int, default=200)
     p.add_argument("--plateau-min-delta", type=float, default=1e-4)
+    # QN-phase early stopping (urban-style relative-MA criterion).
+    p.add_argument("--no-early-stop", dest="early_stop", action="store_false",
+                   help="Disable QN-phase early stopping (run the full budget).")
+    p.set_defaults(early_stop=True)
+    p.add_argument("--es-patience", type=int, default=300)
+    p.add_argument("--es-window", type=int, default=20)
+    p.add_argument("--es-min-delta", type=float, default=1e-4)
+    p.add_argument("--es-stop-loss", type=float, default=0.0,
+                   help="Absolute J_val floor; stop once reached. <=0 disables.")
     p.add_argument(
         "--patience",
         type=int,
         default=None,
-        help="Early-stopping patience on the validation MA. Default disabled.",
+        help="Legacy best-weights no-improve counter; QN early stopping is "
+             "controlled by the --es-* flags. Default disabled.",
     )
     p.add_argument("--n-collocation", type=int, default=400)
     p.add_argument(
@@ -624,6 +679,11 @@ def main(argv: list[str] | None = None) -> None:
         plateau_patience=args.plateau_patience,
         plateau_min_delta=args.plateau_min_delta,
         patience=patience,
+        early_stop=args.early_stop,
+        es_patience=args.es_patience,
+        es_window=args.es_window,
+        es_min_delta=args.es_min_delta,
+        es_stop_loss=args.es_stop_loss,
     )
 
     write_summary(

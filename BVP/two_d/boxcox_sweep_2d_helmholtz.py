@@ -310,19 +310,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="ssbroyden",
         choices=["bfgs", "ssbfgs", "ssbroyden"],
     )
-    p.add_argument("--epochs", type=int, default=20000)
-    p.add_argument("--adam-epochs", type=int, default=10000)
+    p.add_argument("--epochs", type=int, default=10000,
+                   help="Total budget cap (2000 Adam + up to 8000 QN); QN-phase "
+                        "early stopping ends most runs well before this.")
+    p.add_argument("--adam-epochs", type=int, default=2000,
+                   help="Standardised fixed Adam warm-up before handover.")
     p.add_argument("--n-collocation", type=int, default=10000)
     p.add_argument("--hidden", type=int, nargs="+", default=[20, 20])
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument(
         "--handover-strategy",
         type=str,
-        default="plateau",
+        default="fixed",
         choices=["fixed", "plateau", "loss_threshold", "gradnorm"],
-        help="Adam -> SSBroyden trigger. plateau (default): switch when "
-             "Adam-phase val J fails to improve by --plateau-min-delta over "
-             "--plateau-patience epochs. fixed: switch at exactly --adam-epochs.",
+        help="Adam -> SSBroyden trigger. Default 'fixed': switch at exactly "
+             "--adam-epochs (the standardised 2000-epoch convention) so every "
+             "seed shares an identical Adam phase.",
     )
     p.add_argument("--handover-max-adam-epochs", type=int, default=10000)
     p.add_argument("--plateau-patience", type=int, default=200)

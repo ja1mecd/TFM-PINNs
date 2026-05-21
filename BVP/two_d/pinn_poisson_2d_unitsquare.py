@@ -30,9 +30,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -241,20 +243,24 @@ class PoissonPINN:
         # `handover_strategy='fixed'` we fall back to the legacy schedule
         # (switch at exactly `adam_epochs`). The other two strategies match
         # `pinn_adaptive_handover.py` for parity with the 1D solver.
-        handover_strategy: str = "plateau",
+        handover_strategy: str = "fixed",
         handover_max_adam_epochs: int = 10000,
         plateau_patience: int = 200,
         plateau_min_delta: float = 1e-4,
         loss_threshold: float = 1.0,
         gradnorm_threshold: float = 1e-3,
-        # ---- QN-phase early stopping ----
-        # `patience` is only consulted AFTER handover, so an Adam plateau
-        # cannot terminate the run before the QN method gets a chance to
-        # drive J into the small-loss regime. Set `patience >= n_epochs` to
-        # disable QN-phase early stopping entirely.
+        # ---- QN-phase early stopping (urban-style relative-MA criterion) ----
+        # Mirrors pinn_ssbroyden_2d_urban.py. Active only AFTER handover, so an
+        # Adam plateau cannot terminate the run before the QN method engages.
+        # `min_delta`/`moving_avg_window` still drive the best-weights tracker.
         patience: int = 500,
         min_delta: float = 1e-12,
         moving_avg_window: int = 20,
+        early_stop: bool = True,
+        es_patience: int = 300,
+        es_window: int = 20,
+        es_min_delta: float = 1e-4,
+        es_stop_loss: float = 0.0,
     ) -> None:
         valid_strategies = ("fixed", "plateau", "loss_threshold", "gradnorm")
         if handover_strategy not in valid_strategies:
@@ -281,9 +287,16 @@ class PoissonPINN:
         handover_done = False
         self.handover_epoch: int | None = None
 
-        # QN-phase early-stop detector (only active once handover_done).
+        # QN-phase best-weights tracker (only active once handover_done).
         ma_buf: list[float] = []
         epochs_no_improve = 0
+
+        # QN-phase early-stop detector (urban-style relative-MA on raw val J).
+        es_hist: "deque[float]" = deque(maxlen=es_window)
+        es_best_ma = float("inf")
+        es_bad = 0
+        es_stopped_at = None
+        es_reason = ""
 
         for epoch in range(1, n_epochs + 1):
             if epoch != 1 and ((epoch - 1) % resample_every == 0):
@@ -367,6 +380,9 @@ class PoissonPINN:
                     self.best_state = None
                     ma_buf = []
                     epochs_no_improve = 0
+                    es_hist.clear()
+                    es_best_ma = float("inf")
+                    es_bad = 0
                     print(
                         f"  [handover] epoch {epoch}: Adam -> QN "
                         f"(strategy={handover_strategy}, "
@@ -392,30 +408,48 @@ class PoissonPINN:
                 else:
                     epochs_no_improve += 1
 
+                # Urban-style relative-MA early-stop counter (raw val J).
+                if early_stop:
+                    jv = float(val_raw.item())
+                    es_hist.append(jv)
+                    if es_stop_loss > 0.0 and math.isfinite(jv) and jv <= es_stop_loss:
+                        es_reason = f"J_val={jv:.3e} <= stop_loss={es_stop_loss:.1e}"
+                        es_stopped_at = epoch
+                    elif len(es_hist) == es_hist.maxlen:
+                        ma = float(np.mean(es_hist))
+                        if math.isfinite(ma) and ma < es_best_ma * (1.0 - es_min_delta):
+                            es_best_ma = ma
+                            es_bad = 0
+                        else:
+                            es_bad += 1
+                            if es_bad >= es_patience:
+                                es_reason = (
+                                    f"no >{es_min_delta:.1e} rel. improvement in "
+                                    f"MA(J_val, w={es_window}) for {es_patience} "
+                                    f"epochs (MA={ma:.3e}, best={es_best_ma:.3e})"
+                                )
+                                es_stopped_at = epoch
+
+            # Diagnostics every epoch (printing throttled by verbose_freq). The
+            # old every-verbose_freq sampling produced a coarse solution-error
+            # staircase in the convergence plots.
+            l2_abs, l2_rel = self.compute_sol_l2(n=diag_grid_n)
+            self.sol_l2.append(l2_abs)
+            self.sol_rel_l2.append(l2_rel)
             if epoch == 1 or (epoch % verbose_freq == 0):
-                l2_abs, l2_rel = self.compute_sol_l2(n=diag_grid_n)
-                self.sol_l2.append(l2_abs)
-                self.sol_rel_l2.append(l2_rel)
                 phase = "ADAM" if use_adam else "QN"
                 print(
                     f"Epoch {epoch:6d} [{phase}] | J_train={self.J_train[-1]:.3e} | "
                     f"J_val={self.J_val[-1]:.3e} | solL2={l2_abs:.3e} | relL2={l2_rel:.3e}"
                 )
-            else:
-                if self.sol_l2:
-                    self.sol_l2.append(self.sol_l2[-1])
-                    self.sol_rel_l2.append(self.sol_rel_l2[-1])
-                else:
-                    self.sol_l2.append(float("nan"))
-                    self.sol_rel_l2.append(float("nan"))
 
-            # Early stopping fires only AFTER handover.
-            if handover_done and epochs_no_improve >= patience:
+            # QN-phase early stopping (urban-style; fires only after handover).
+            if es_stopped_at is not None:
                 self.early_stop_epoch = epoch
+                n_qn = epoch - (self.handover_epoch or adam_epochs)
                 print(
-                    f"Early stopping at epoch {epoch} "
-                    f"(QN-phase val-MA has not improved by {min_delta:g} for "
-                    f"{patience} epochs; best MA = {self.best_val_ma:.3e})."
+                    f"  [QN early stop] epoch {epoch} ({n_qn} QN steps): "
+                    f"{es_reason}"
                 )
                 break
 
@@ -617,8 +651,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["identity", "sqrt", "log", "boxcox"],
     )
     p.add_argument("--loss-lambda", type=float, default=1.0)
-    p.add_argument("--epochs", type=int, default=15000)
-    p.add_argument("--adam-epochs", type=int, default=5000)
+    p.add_argument("--epochs", type=int, default=10000,
+                   help="Total budget cap (2000 Adam + up to 8000 QN); QN-phase "
+                        "early stopping ends most runs well before this.")
+    p.add_argument("--adam-epochs", type=int, default=2000,
+                   help="Standardised fixed Adam warm-up before handover.")
     p.add_argument("--n-collocation", type=int, default=2000)
     p.add_argument("--hidden", type=int, nargs="+", default=[32, 32, 32])
     p.add_argument("--lr", type=float, default=1e-3)
@@ -626,12 +663,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--handover-strategy",
         type=str,
-        default="plateau",
+        default="fixed",
         choices=["fixed", "plateau", "loss_threshold", "gradnorm"],
         help="When to hand over from Adam to the quasi-Newton optimiser. "
-             "plateau (default): switch as soon as the Adam-phase J fails "
-             "to improve by --plateau-min-delta over --plateau-patience "
-             "epochs. fixed: switch at exactly --adam-epochs (legacy).",
+             "Default 'fixed': switch at exactly --adam-epochs (the "
+             "standardised 2000-epoch convention) so the dashed handover "
+             "line is meaningful and all seeds share an identical Adam phase.",
     )
     p.add_argument(
         "--handover-max-adam-epochs",
