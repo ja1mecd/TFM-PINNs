@@ -277,11 +277,14 @@ class PINN_L2_Minimizer:
 # MAIN ROUTINE
 # -------------------------------------------------------------------------
 def main():
-    # Winning configuration from the cross-activation architecture sweep
-    # (section 4.1 of the thesis): ReLU achieves the lowest L-infinity error
-    # at (L = 2, W = 80). Tanh remains the baseline for the PDE experiments
-    # in subsequent sections, where derivative regularity is what matters.
-    model = NeuralNetwork(hidden_layers=[80, 80], activation=nn.ReLU())
+    # Best configuration from the cross-activation architecture sweep
+    # (section 4.1 of the thesis): ReLU achieves the lowest mean L-infinity
+    # error at (L = 4, W = 80). Tanh remains the baseline for the PDE
+    # experiments in subsequent sections, where derivative regularity matters.
+    # Seed fixed so the figure committed to the thesis is reproducible.
+    torch.manual_seed(42)
+    np.random.seed(42)
+    model = NeuralNetwork(hidden_layers=[80, 80, 80, 80], activation=nn.ReLU())
     print("\nNeural Network Architecture:\n")
     print(model, "\n")
 

@@ -181,39 +181,54 @@ def run_sweep(args: argparse.Namespace) -> list[CellResult]:
 
 def plot_heatmap(linf_mean: Sequence[Sequence[float]], layers: list[int],
                  neurons: list[int], activation: str,
-                 output_path: str) -> None:
+                 output_path: str, vmin: float | None = None,
+                 vmax: float | None = None) -> None:
+    """Render one log10-error heatmap.
+
+    Pass a shared ``vmin``/``vmax`` (in log10 units) to put several panels on
+    a common colour scale; left as ``None`` each panel auto-scales itself.
+    """
     arr = np.array(linf_mean, dtype=float)
     with np.errstate(divide="ignore"):
         log_errors = np.log10(arr)
     masked = np.ma.masked_invalid(log_errors)
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    # Compact figure + large fonts: each panel is shown small (~0.49 of the
+    # text width) in the four-up thesis figure, so the figure must be sized
+    # close to its display size and the annotations made large, otherwise the
+    # per-cell numbers are unreadable once LaTeX downscales the image.
+    fig, ax = plt.subplots(figsize=(7.5, 6.0))
     cmap = copy.copy(plt.get_cmap("viridis"))  # .copy() needs mpl>=3.4; stay portable
     cmap.set_bad(color="lightgray")
-    im = ax.imshow(masked, cmap=cmap, aspect="auto", origin="lower")
-    mean_finite = masked.mean() if masked.count() else 0.0
+    im = ax.imshow(masked, cmap=cmap, aspect="auto", origin="lower",
+                   vmin=vmin, vmax=vmax)
+    # Text-colour threshold: midpoint of the (shared) colour scale if one is
+    # given, otherwise the panel's own mean.
+    if vmin is not None and vmax is not None:
+        thresh = 0.5 * (vmin + vmax)
+    else:
+        thresh = masked.mean() if masked.count() else 0.0
     for i in range(len(layers)):
         for j in range(len(neurons)):
             val = log_errors[i, j]
             if not np.isfinite(val):
                 ax.text(j, i, "fail", ha="center", va="center",
-                        color="black")
+                        color="black", fontsize=16)
                 continue
-            color = "white" if val < mean_finite else "black"
-            ax.text(j, i, f"{val:.2f}", ha="center", va="center", color=color)
+            color = "white" if val < thresh else "black"
+            ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                    color=color, fontsize=18)
 
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label(r"$\log_{10} \varepsilon_\infty$ (mean over seeds)")
+    cbar.set_label(r"$\log_{10} \varepsilon_\infty$ (mean over seeds)", fontsize=15)
+    cbar.ax.tick_params(labelsize=13)
     ax.set_xticks(range(len(neurons)))
     ax.set_yticks(range(len(layers)))
-    ax.set_xticklabels(neurons)
-    ax.set_yticklabels(layers)
-    ax.set_xlabel("Neurons per layer (W)")
-    ax.set_ylabel("Hidden layers (L)")
-    ax.set_title(
-        rf"$\log_{{10}} \varepsilon_\infty$ on the depth/width grid — "
-        rf"{activation} (mean over seeds)"
-    )
+    ax.set_xticklabels(neurons, fontsize=15)
+    ax.set_yticklabels(layers, fontsize=15)
+    ax.set_xlabel("Neurons per layer (W)", fontsize=16)
+    ax.set_ylabel("Hidden layers (L)", fontsize=16)
+    ax.set_title(activation, fontsize=17)
     plt.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=200)
