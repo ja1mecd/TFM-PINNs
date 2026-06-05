@@ -70,6 +70,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless: no display needed on the remote server
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.colors import LogNorm  # noqa: E402
 
 # Make the shared optimizer importable when running `python pinn_ssbroyden_2d.py`
 # from this directory (BVP/two_d/).
@@ -807,26 +808,30 @@ class PINN_CFGS_Solver:
         ax[0, 2].set_title(r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|$")
         plt.colorbar(im2, ax=ax[0, 2], fraction=0.046)
 
-        # Clip the colormap at the 99th percentile so isolated spikes
-        # (where |P_exact| ~ 0 inflates the ratio) do not flatten the rest
-        # of the field. The underlying values are unchanged; only the
+        # Log color scale, clipped to [p1 of positive pixels, p99]. The lower
+        # bound is floored to a positive value (LogNorm masks non-positive
+        # values) and the dynamic range is capped at ~4 decades so isolated
+        # spikes (where |P_exact| ~ 0 inflates the ratio) do not flatten the
+        # rest of the field. The underlying values are unchanged; only the
         # visual range is bounded.
         rel_vmax = float(np.percentile(rel_err, 99))
         if not np.isfinite(rel_vmax) or rel_vmax <= 0.0:
             rel_vmax = float(np.nanmax(rel_err)) if np.isfinite(np.nanmax(rel_err)) else 1.0
+        rel_pos = rel_err[rel_err > 0.0]
+        rel_vmin = float(np.percentile(rel_pos, 1)) if rel_pos.size else rel_vmax / 1e4
+        rel_vmin = max(rel_vmin, rel_vmax / 1e4)
         im3 = ax[1, 0].imshow(
-            rel_err,
+            np.clip(rel_err, rel_vmin, rel_vmax),
             origin="lower",
             extent=[q_min, q_max, mu_min, mu_max],
             aspect="auto",
-            vmin=0.0,
-            vmax=rel_vmax,
+            norm=LogNorm(vmin=rel_vmin, vmax=rel_vmax),
         )
         ax[1, 0].set_title(
             r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|/(|P_{\mathrm{exact}}| + \varepsilon)$"
-            f"  (clipped at p99 = {rel_vmax:.2e})"
+            f"  (log, {rel_vmin:.1e}–{rel_vmax:.1e})"
         )
-        plt.colorbar(im3, ax=ax[1, 0], fraction=0.046, extend="max")
+        plt.colorbar(im3, ax=ax[1, 0], fraction=0.046, extend="both")
 
         ax[1, 1].semilogy(self.obj_train, label="obj(train)")
         ax[1, 1].semilogy(self.obj_val, label="obj(val)")

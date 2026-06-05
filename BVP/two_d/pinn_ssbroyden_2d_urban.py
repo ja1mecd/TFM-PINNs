@@ -41,6 +41,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.colors import LogNorm  # noqa: E402
 
 _OPT_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "optimizers"
@@ -543,16 +544,22 @@ class PINN_CFGS_Solver_Urban:
         rel_vmax = float(np.percentile(rel_err, 99))
         if not np.isfinite(rel_vmax) or rel_vmax <= 0.0:
             rel_vmax = float(np.nanmax(rel_err)) if np.isfinite(np.nanmax(rel_err)) else 1.0
+        # Log color scale: floor the lower bound at a positive value and cap the
+        # dynamic range to ~4 decades so a handful of near-zero pixels do not
+        # dominate the colormap (LogNorm masks non-positive values).
+        rel_pos = rel_err[rel_err > 0.0]
+        rel_vmin = float(np.percentile(rel_pos, 1)) if rel_pos.size else rel_vmax / 1e4
+        rel_vmin = max(rel_vmin, rel_vmax / 1e4)
         im3 = ax[1, 0].imshow(
-            rel_err, origin="lower",
+            np.clip(rel_err, rel_vmin, rel_vmax), origin="lower",
             extent=[q_min, q_max, mu_min, mu_max], aspect="auto",
-            vmin=0.0, vmax=rel_vmax,
+            norm=LogNorm(vmin=rel_vmin, vmax=rel_vmax),
         )
         ax[1, 0].set_title(
             r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|/(|P_{\mathrm{exact}}| + \varepsilon)$"
-            f"  (clipped at p99 = {rel_vmax:.2e})"
+            f"  (log, {rel_vmin:.1e}–{rel_vmax:.1e})"
         )
-        plt.colorbar(im3, ax=ax[1, 0], fraction=0.046, extend="max")
+        plt.colorbar(im3, ax=ax[1, 0], fraction=0.046, extend="both")
 
         ax[1, 1].semilogy(np.maximum(self.J_train, 1e-300), label="J(train)")
         ax[1, 1].semilogy(np.maximum(self.J_val, 1e-300), label="J(val)")
