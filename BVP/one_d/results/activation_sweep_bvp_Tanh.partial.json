@@ -1,0 +1,1802 @@
+[
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 42,
+    "sol_linf": 2.3886030101419733,
+    "sol_rel_l2": 1.5859354882114463,
+    "residual_l2": 104.78439154915651,
+    "train_time_s": 14.805715100000002,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 43,
+    "sol_linf": 1.8257666539998854,
+    "sol_rel_l2": 1.2029102160245584,
+    "residual_l2": 107.58532721741028,
+    "train_time_s": 9.6096,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 44,
+    "sol_linf": 3.437735149585505,
+    "sol_rel_l2": 2.42119107388631,
+    "residual_l2": 100.66144711585004,
+    "train_time_s": 21.7765118,
+    "epochs_run": 2700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 45,
+    "sol_linf": 1.2414677354443326,
+    "sol_rel_l2": 1.0145936060767318,
+    "residual_l2": 108.64047033372329,
+    "train_time_s": 9.835834499999997,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 46,
+    "sol_linf": 1.2825005059139611,
+    "sol_rel_l2": 1.0309827638072868,
+    "residual_l2": 110.86587790154584,
+    "train_time_s": 5.657246399999998,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 47,
+    "sol_linf": 1.8370456822771186,
+    "sol_rel_l2": 1.2272458533183228,
+    "residual_l2": 108.20054396053935,
+    "train_time_s": 9.771059200000003,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 48,
+    "sol_linf": 1.1730791833221796,
+    "sol_rel_l2": 0.9987275565515523,
+    "residual_l2": 109.90056222753879,
+    "train_time_s": 5.63306080000001,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 49,
+    "sol_linf": 2.214974026376116,
+    "sol_rel_l2": 1.41011033910034,
+    "residual_l2": 99.32759279963543,
+    "train_time_s": 18.0861838,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 50,
+    "sol_linf": 1.483843404470535,
+    "sol_rel_l2": 1.0774444445049265,
+    "residual_l2": 109.69595875737227,
+    "train_time_s": 5.6566179000000005,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 51,
+    "sol_linf": 1.683654100880226,
+    "sol_rel_l2": 1.134221559761959,
+    "residual_l2": 107.58634531256124,
+    "train_time_s": 9.717712199999994,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 52,
+    "sol_linf": 1.762899249733951,
+    "sol_rel_l2": 1.1927412648005362,
+    "residual_l2": 108.66514886607654,
+    "train_time_s": 9.623766899999993,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 53,
+    "sol_linf": 1.4736162463562552,
+    "sol_rel_l2": 1.075917602165931,
+    "residual_l2": 109.7550056094332,
+    "train_time_s": 9.77174690000001,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 54,
+    "sol_linf": 1.1335907590242231,
+    "sol_rel_l2": 0.9965035076584022,
+    "residual_l2": 109.68581709321332,
+    "train_time_s": 5.676155800000004,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 55,
+    "sol_linf": 1.3745369994283962,
+    "sol_rel_l2": 1.0439567278985038,
+    "residual_l2": 110.15922935350208,
+    "train_time_s": 5.651179600000006,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 56,
+    "sol_linf": 1.1305725552696342,
+    "sol_rel_l2": 0.9941354942539701,
+    "residual_l2": 109.897536612711,
+    "train_time_s": 5.6514861,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 57,
+    "sol_linf": 2.0067868147815244,
+    "sol_rel_l2": 1.3013836200268143,
+    "residual_l2": 98.2562217408258,
+    "train_time_s": 21.85258399999998,
+    "epochs_run": 2700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 58,
+    "sol_linf": 1.856061618024218,
+    "sol_rel_l2": 1.2246889561068701,
+    "residual_l2": 107.76487891321646,
+    "train_time_s": 9.635675300000003,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 59,
+    "sol_linf": 1.422657243915808,
+    "sol_rel_l2": 1.083851777524587,
+    "residual_l2": 104.51694835677779,
+    "train_time_s": 13.916184099999981,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 60,
+    "sol_linf": 1.5215151095033932,
+    "sol_rel_l2": 1.0945938866186495,
+    "residual_l2": 109.75292826506296,
+    "train_time_s": 5.922420999999986,
+    "epochs_run": 722
+  },
+  {
+    "layers": 1,
+    "neurons": 5,
+    "seed": 61,
+    "sol_linf": 1.2502680718317294,
+    "sol_rel_l2": 1.0098524892234393,
+    "residual_l2": 110.00110244479892,
+    "train_time_s": 5.747203399999989,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 42,
+    "sol_linf": 2.6159215971123286,
+    "sol_rel_l2": 1.713213601270012,
+    "residual_l2": 102.95248468306673,
+    "train_time_s": 13.843174199999993,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 43,
+    "sol_linf": 2.4820827106297694,
+    "sol_rel_l2": 1.6010177878024843,
+    "residual_l2": 105.4358254422373,
+    "train_time_s": 9.785011699999984,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 44,
+    "sol_linf": 2.8928211654792166,
+    "sol_rel_l2": 1.931518511555019,
+    "residual_l2": 87.88444426885101,
+    "train_time_s": 22.10684950000001,
+    "epochs_run": 2700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 45,
+    "sol_linf": 1.9525869294942497,
+    "sol_rel_l2": 1.2704217422855062,
+    "residual_l2": 106.82430608714442,
+    "train_time_s": 9.60834079999998,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 46,
+    "sol_linf": 1.5015306451879182,
+    "sol_rel_l2": 1.06486744069701,
+    "residual_l2": 108.05808911159036,
+    "train_time_s": 5.562867400000016,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 47,
+    "sol_linf": 1.9365435615042965,
+    "sol_rel_l2": 1.2708517975661877,
+    "residual_l2": 107.20195610572154,
+    "train_time_s": 9.54734689999998,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 48,
+    "sol_linf": 1.2638422280710446,
+    "sol_rel_l2": 1.0090691632064444,
+    "residual_l2": 109.39984135695723,
+    "train_time_s": 5.61553710000004,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 49,
+    "sol_linf": 2.9287697630636416,
+    "sol_rel_l2": 1.9321979458336402,
+    "residual_l2": 94.05756533712031,
+    "train_time_s": 18.072591199999977,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 50,
+    "sol_linf": 1.4982778427965864,
+    "sol_rel_l2": 1.1340744999195156,
+    "residual_l2": 105.74733594030408,
+    "train_time_s": 9.793278299999997,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 51,
+    "sol_linf": 1.8657644251645291,
+    "sol_rel_l2": 1.2199369286447708,
+    "residual_l2": 106.17819986353312,
+    "train_time_s": 9.875545299999999,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 52,
+    "sol_linf": 2.3621721842847503,
+    "sol_rel_l2": 1.5415826499347245,
+    "residual_l2": 106.27736398959777,
+    "train_time_s": 9.843440299999997,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 53,
+    "sol_linf": 2.510236345695235,
+    "sol_rel_l2": 1.7291788173471403,
+    "residual_l2": 107.63206866782346,
+    "train_time_s": 9.59021329999996,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 54,
+    "sol_linf": 1.2516903385461449,
+    "sol_rel_l2": 1.00993224173461,
+    "residual_l2": 108.77979834508764,
+    "train_time_s": 5.695206299999995,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 55,
+    "sol_linf": 1.8071383618952084,
+    "sol_rel_l2": 1.2309293112119484,
+    "residual_l2": 108.92786382048065,
+    "train_time_s": 5.703072399999996,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 56,
+    "sol_linf": 1.461550803169807,
+    "sol_rel_l2": 1.0568933468004897,
+    "residual_l2": 108.7520365345971,
+    "train_time_s": 5.720533399999965,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 57,
+    "sol_linf": 2.4487848788041644,
+    "sol_rel_l2": 1.6031338138836277,
+    "residual_l2": 93.8580287130971,
+    "train_time_s": 21.916817699999967,
+    "epochs_run": 2700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 58,
+    "sol_linf": 2.584818826085397,
+    "sol_rel_l2": 1.6772651055640089,
+    "residual_l2": 105.3393823259406,
+    "train_time_s": 9.779423699999995,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 59,
+    "sol_linf": 1.7742669144332264,
+    "sol_rel_l2": 1.2825760863975764,
+    "residual_l2": 100.88140104591594,
+    "train_time_s": 14.075867300000027,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 60,
+    "sol_linf": 1.7193826564211006,
+    "sol_rel_l2": 1.172436855821282,
+    "residual_l2": 108.6663934925054,
+    "train_time_s": 5.935379800000021,
+    "epochs_run": 721
+  },
+  {
+    "layers": 1,
+    "neurons": 10,
+    "seed": 61,
+    "sol_linf": 1.3740990769716108,
+    "sol_rel_l2": 1.0290093174318067,
+    "residual_l2": 108.72570147548618,
+    "train_time_s": 5.7652084999999715,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 42,
+    "sol_linf": 3.2071166239249984,
+    "sol_rel_l2": 2.166534434449155,
+    "residual_l2": 101.02113203733809,
+    "train_time_s": 13.774017500000014,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 43,
+    "sol_linf": 3.1650446462921313,
+    "sol_rel_l2": 2.1080064138165513,
+    "residual_l2": 104.19293976550988,
+    "train_time_s": 9.600262000000043,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 44,
+    "sol_linf": 2.8952293311084287,
+    "sol_rel_l2": 1.9271188063819047,
+    "residual_l2": 93.69046545870533,
+    "train_time_s": 18.047425900000007,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 45,
+    "sol_linf": 2.382517074621937,
+    "sol_rel_l2": 1.5403331381787706,
+    "residual_l2": 105.11427512363471,
+    "train_time_s": 9.926268900000025,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 46,
+    "sol_linf": 1.3453991668932161,
+    "sol_rel_l2": 1.0437227066333403,
+    "residual_l2": 107.17664921794696,
+    "train_time_s": 5.702521100000013,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 47,
+    "sol_linf": 2.461880063093922,
+    "sol_rel_l2": 1.6124318404889224,
+    "residual_l2": 104.53561999768841,
+    "train_time_s": 9.78431169999999,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 48,
+    "sol_linf": 1.7238013008893216,
+    "sol_rel_l2": 1.1538316110563651,
+    "residual_l2": 106.70645110457558,
+    "train_time_s": 5.604319999999973,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 49,
+    "sol_linf": 3.170370693380291,
+    "sol_rel_l2": 2.1456681087391885,
+    "residual_l2": 92.0293117893231,
+    "train_time_s": 18.19799370000004,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 50,
+    "sol_linf": 2.2415777039055182,
+    "sol_rel_l2": 1.476782090456974,
+    "residual_l2": 104.35930763653113,
+    "train_time_s": 9.767470100000025,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 51,
+    "sol_linf": 2.2516284990600757,
+    "sol_rel_l2": 1.4470443660188326,
+    "residual_l2": 103.22669092578126,
+    "train_time_s": 9.623862200000076,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 52,
+    "sol_linf": 2.6968839029133997,
+    "sol_rel_l2": 1.7503193736065321,
+    "residual_l2": 103.27983777900845,
+    "train_time_s": 9.763972800000033,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 53,
+    "sol_linf": 3.019621171915655,
+    "sol_rel_l2": 2.1398011758882305,
+    "residual_l2": 106.62962302669014,
+    "train_time_s": 9.91805290000002,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 54,
+    "sol_linf": 1.3627613825057112,
+    "sol_rel_l2": 1.0660413472331902,
+    "residual_l2": 106.59207165983418,
+    "train_time_s": 5.73486349999996,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 55,
+    "sol_linf": 2.5317486564056937,
+    "sol_rel_l2": 1.7119544086095773,
+    "residual_l2": 106.88834215475546,
+    "train_time_s": 5.741828499999997,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 56,
+    "sol_linf": 1.5567917684376917,
+    "sol_rel_l2": 1.0878053074475493,
+    "residual_l2": 107.25214403159238,
+    "train_time_s": 5.719767499999989,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 57,
+    "sol_linf": 3.216487396615679,
+    "sol_rel_l2": 2.1785119643665767,
+    "residual_l2": 97.95411650097613,
+    "train_time_s": 17.994102800000064,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 58,
+    "sol_linf": 3.228694300680559,
+    "sol_rel_l2": 2.1599133481613007,
+    "residual_l2": 103.83469063002667,
+    "train_time_s": 9.931198399999971,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 59,
+    "sol_linf": 1.790898569882768,
+    "sol_rel_l2": 1.400786528801635,
+    "residual_l2": 98.61816792647059,
+    "train_time_s": 14.035866499999997,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 60,
+    "sol_linf": 2.213204523545492,
+    "sol_rel_l2": 1.4655707044238344,
+    "residual_l2": 107.18775238237649,
+    "train_time_s": 5.726951799999938,
+    "epochs_run": 720
+  },
+  {
+    "layers": 1,
+    "neurons": 20,
+    "seed": 61,
+    "sol_linf": 1.901107833644245,
+    "sol_rel_l2": 1.2436744285969283,
+    "residual_l2": 106.78178707359025,
+    "train_time_s": 5.692982699999902,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 42,
+    "sol_linf": 3.5134428545128413,
+    "sol_rel_l2": 2.4341141965587476,
+    "residual_l2": 99.10815244070146,
+    "train_time_s": 13.84067959999993,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 43,
+    "sol_linf": 3.078733614041286,
+    "sol_rel_l2": 2.0460049542090286,
+    "residual_l2": 103.06452981589112,
+    "train_time_s": 9.817157899999984,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 44,
+    "sol_linf": 1.7312969865881678,
+    "sol_rel_l2": 1.3867503721702308,
+    "residual_l2": 101.93573890514082,
+    "train_time_s": 9.987683999999945,
+    "epochs_run": 1220
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 45,
+    "sol_linf": 2.5819349456114526,
+    "sol_rel_l2": 1.6885840470045603,
+    "residual_l2": 105.14915252950452,
+    "train_time_s": 5.956212299999947,
+    "epochs_run": 747
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 46,
+    "sol_linf": 1.797481690094289,
+    "sol_rel_l2": 1.2163655592793745,
+    "residual_l2": 104.5556747851854,
+    "train_time_s": 5.706801799999994,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 47,
+    "sol_linf": 1.7858048675425278,
+    "sol_rel_l2": 1.2230334518107118,
+    "residual_l2": 104.74614331597624,
+    "train_time_s": 6.114993300000037,
+    "epochs_run": 743
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 48,
+    "sol_linf": 2.1474516122879796,
+    "sol_rel_l2": 1.4034447879634977,
+    "residual_l2": 104.57374260568776,
+    "train_time_s": 5.76408779999997,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 49,
+    "sol_linf": 1.9507220118584443,
+    "sol_rel_l2": 1.2941496878839267,
+    "residual_l2": 104.70135972955974,
+    "train_time_s": 5.758803100000023,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 50,
+    "sol_linf": 3.122904823085163,
+    "sol_rel_l2": 2.1543396517831446,
+    "residual_l2": 105.28905151260368,
+    "train_time_s": 5.749557999999979,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 51,
+    "sol_linf": 2.3671097718026433,
+    "sol_rel_l2": 1.5428678262385511,
+    "residual_l2": 102.11280290509056,
+    "train_time_s": 9.850920599999995,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 52,
+    "sol_linf": 2.568002446136514,
+    "sol_rel_l2": 1.6612771285546588,
+    "residual_l2": 101.80537675910226,
+    "train_time_s": 9.707612700000027,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 53,
+    "sol_linf": 2.9542475202287175,
+    "sol_rel_l2": 2.049635292493778,
+    "residual_l2": 104.63614666217808,
+    "train_time_s": 9.83710080000003,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 54,
+    "sol_linf": 1.5932397359040609,
+    "sol_rel_l2": 1.269353594344814,
+    "residual_l2": 104.50434836049088,
+    "train_time_s": 5.7199990999999955,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 55,
+    "sol_linf": 2.982628045376364,
+    "sol_rel_l2": 2.039281338747551,
+    "residual_l2": 105.328288634724,
+    "train_time_s": 5.71927740000001,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 56,
+    "sol_linf": 1.8824471649140007,
+    "sol_rel_l2": 1.2505028678647874,
+    "residual_l2": 104.83916175440758,
+    "train_time_s": 5.754642399999966,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 57,
+    "sol_linf": 4.074025857864471,
+    "sol_rel_l2": 2.9450340201028693,
+    "residual_l2": 97.73062643995738,
+    "train_time_s": 18.18955159999996,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 58,
+    "sol_linf": 3.3866945467736516,
+    "sol_rel_l2": 2.287199650133372,
+    "residual_l2": 102.76162633820398,
+    "train_time_s": 9.879875200000015,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 59,
+    "sol_linf": 1.8606603661068282,
+    "sol_rel_l2": 1.4586009457386706,
+    "residual_l2": 95.76554501405775,
+    "train_time_s": 13.972872100000018,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 60,
+    "sol_linf": 3.1057661578000664,
+    "sol_rel_l2": 2.1276793874496125,
+    "residual_l2": 105.17467401321187,
+    "train_time_s": 5.8058926999999585,
+    "epochs_run": 720
+  },
+  {
+    "layers": 1,
+    "neurons": 40,
+    "seed": 61,
+    "sol_linf": 2.1883120877001847,
+    "sol_rel_l2": 1.4131673259740718,
+    "residual_l2": 104.42301930346791,
+    "train_time_s": 5.704891400000065,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 42,
+    "sol_linf": 2.740615840985993,
+    "sol_rel_l2": 1.8002915224221203,
+    "residual_l2": 103.55236713426002,
+    "train_time_s": 5.579142300000058,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 43,
+    "sol_linf": 2.9539185719974785,
+    "sol_rel_l2": 1.9690314603054768,
+    "residual_l2": 102.67087646808228,
+    "train_time_s": 9.580804400000034,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 44,
+    "sol_linf": 1.9816786139073659,
+    "sol_rel_l2": 1.4803194390104022,
+    "residual_l2": 103.27664107770246,
+    "train_time_s": 5.7544152000000395,
+    "epochs_run": 720
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 45,
+    "sol_linf": 2.898595552473467,
+    "sol_rel_l2": 1.9250732586625763,
+    "residual_l2": 104.18700976775634,
+    "train_time_s": 5.903502300000014,
+    "epochs_run": 729
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 46,
+    "sol_linf": 1.6839153305953025,
+    "sol_rel_l2": 1.2948014581332283,
+    "residual_l2": 103.25290036120114,
+    "train_time_s": 5.706693100000052,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 47,
+    "sol_linf": 1.6314802836272344,
+    "sol_rel_l2": 1.2609966707922655,
+    "residual_l2": 103.59701676750805,
+    "train_time_s": 5.9515795999999455,
+    "epochs_run": 731
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 48,
+    "sol_linf": 2.478252821536749,
+    "sol_rel_l2": 1.6640295277192834,
+    "residual_l2": 103.46015442393805,
+    "train_time_s": 5.683512900000096,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 49,
+    "sol_linf": 2.248983120219601,
+    "sol_rel_l2": 1.4865930622662773,
+    "residual_l2": 103.4701704633708,
+    "train_time_s": 5.471584100000086,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 50,
+    "sol_linf": 3.650304306405718,
+    "sol_rel_l2": 2.572693735034273,
+    "residual_l2": 104.48560342656931,
+    "train_time_s": 5.583765800000037,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 51,
+    "sol_linf": 2.2209598356206115,
+    "sol_rel_l2": 1.528338362004585,
+    "residual_l2": 102.88040678937479,
+    "train_time_s": 5.87591759999998,
+    "epochs_run": 720
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 52,
+    "sol_linf": 2.6652640019382017,
+    "sol_rel_l2": 1.733419672512822,
+    "residual_l2": 101.1565131838778,
+    "train_time_s": 9.724886099999935,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 53,
+    "sol_linf": 3.3228945731621287,
+    "sol_rel_l2": 2.2975295589560853,
+    "residual_l2": 104.26249505803244,
+    "train_time_s": 6.054067000000032,
+    "epochs_run": 735
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 54,
+    "sol_linf": 1.6998636650059504,
+    "sol_rel_l2": 1.3676132367199199,
+    "residual_l2": 103.53649127356944,
+    "train_time_s": 4.879055999999991,
+    "epochs_run": 613
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 55,
+    "sol_linf": 3.0844142637718,
+    "sol_rel_l2": 2.091796726656189,
+    "residual_l2": 104.14075868426616,
+    "train_time_s": 5.602653199999963,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 56,
+    "sol_linf": 2.2760894723007152,
+    "sol_rel_l2": 1.4978710712763155,
+    "residual_l2": 103.46628342286932,
+    "train_time_s": 5.622100799999998,
+    "epochs_run": 700
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 57,
+    "sol_linf": 4.345475748835952,
+    "sol_rel_l2": 3.216149570715017,
+    "residual_l2": 95.64917204024276,
+    "train_time_s": 18.06067619999999,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 58,
+    "sol_linf": 2.6113553943716763,
+    "sol_rel_l2": 1.7574728475353025,
+    "residual_l2": 103.47392960477245,
+    "train_time_s": 5.872306999999978,
+    "epochs_run": 720
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 59,
+    "sol_linf": 2.125392728419989,
+    "sol_rel_l2": 1.5113499571850189,
+    "residual_l2": 94.86421404960645,
+    "train_time_s": 14.029884599999946,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 60,
+    "sol_linf": 3.2692096400542017,
+    "sol_rel_l2": 2.227088295585123,
+    "residual_l2": 103.9954362973495,
+    "train_time_s": 5.549881199999959,
+    "epochs_run": 720
+  },
+  {
+    "layers": 1,
+    "neurons": 80,
+    "seed": 61,
+    "sol_linf": 2.2645775866035778,
+    "sol_rel_l2": 1.4893623826408213,
+    "residual_l2": 103.27707800551084,
+    "train_time_s": 5.61531279999997,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 42,
+    "sol_linf": 3.4868647662754864,
+    "sol_rel_l2": 2.501147586712719,
+    "residual_l2": 84.17019964318537,
+    "train_time_s": 17.248275600000056,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 43,
+    "sol_linf": 2.95527261352737,
+    "sol_rel_l2": 2.0263532547486007,
+    "residual_l2": 88.00398943570758,
+    "train_time_s": 12.146555700000022,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 44,
+    "sol_linf": 3.252449583262492,
+    "sol_rel_l2": 2.2980345153063095,
+    "residual_l2": 84.76179896643201,
+    "train_time_s": 17.008844400000044,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 45,
+    "sol_linf": 3.4909655658360332,
+    "sol_rel_l2": 2.516017664431075,
+    "residual_l2": 83.87320976932682,
+    "train_time_s": 22.32386919999999,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 46,
+    "sol_linf": 2.9151827621075523,
+    "sol_rel_l2": 1.9695730649494176,
+    "residual_l2": 86.84565146627696,
+    "train_time_s": 12.020221499999934,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 47,
+    "sol_linf": 2.549797631767021,
+    "sol_rel_l2": 1.6726392012438278,
+    "residual_l2": 88.42618475523038,
+    "train_time_s": 11.905143500000008,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 48,
+    "sol_linf": 3.565922526117784,
+    "sol_rel_l2": 2.5821304242584984,
+    "residual_l2": 83.71955629641006,
+    "train_time_s": 22.306744999999978,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 49,
+    "sol_linf": 1.2766980443919675,
+    "sol_rel_l2": 0.9435238441957706,
+    "residual_l2": 75.5165288073522,
+    "train_time_s": 12.01823679999984,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 50,
+    "sol_linf": 2.9401413784046895,
+    "sol_rel_l2": 2.019574729284124,
+    "residual_l2": 87.41850496896352,
+    "train_time_s": 11.946711800000003,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 51,
+    "sol_linf": 2.8170013625475447,
+    "sol_rel_l2": 1.903354413721816,
+    "residual_l2": 87.68621828081069,
+    "train_time_s": 11.966126600000052,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 52,
+    "sol_linf": 3.090533866382419,
+    "sol_rel_l2": 2.1273790018098637,
+    "residual_l2": 84.66160122629908,
+    "train_time_s": 17.27591129999996,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 53,
+    "sol_linf": 3.071787549201083,
+    "sol_rel_l2": 2.111699010628568,
+    "residual_l2": 87.02687542550261,
+    "train_time_s": 11.973678899999868,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 54,
+    "sol_linf": 2.781664272055296,
+    "sol_rel_l2": 1.8684988387186707,
+    "residual_l2": 87.42630226814113,
+    "train_time_s": 11.947434799999883,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 55,
+    "sol_linf": 3.4250022474870443,
+    "sol_rel_l2": 2.4494639752335385,
+    "residual_l2": 84.64350823439278,
+    "train_time_s": 16.843119100000195,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 56,
+    "sol_linf": 1.8678269222926818,
+    "sol_rel_l2": 1.204593034351715,
+    "residual_l2": 101.1642934575238,
+    "train_time_s": 6.967245300000059,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 57,
+    "sol_linf": 3.7318765309410082,
+    "sol_rel_l2": 2.7059030551404883,
+    "residual_l2": 84.1174713322734,
+    "train_time_s": 21.857586999999967,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 58,
+    "sol_linf": 3.515824994241795,
+    "sol_rel_l2": 2.5302874508607758,
+    "residual_l2": 83.80360274012824,
+    "train_time_s": 21.02611999999999,
+    "epochs_run": 2124
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 59,
+    "sol_linf": 3.098005904651462,
+    "sol_rel_l2": 2.146567098405313,
+    "residual_l2": 84.82907945400585,
+    "train_time_s": 16.998161399999844,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 60,
+    "sol_linf": 3.667206920669501,
+    "sol_rel_l2": 2.655534320365666,
+    "residual_l2": 83.76319304332574,
+    "train_time_s": 22.23026579999987,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 2,
+    "neurons": 5,
+    "seed": 61,
+    "sol_linf": 3.0169436466131923,
+    "sol_rel_l2": 2.067088918505465,
+    "residual_l2": 84.69903934824667,
+    "train_time_s": 16.91317959999992,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 42,
+    "sol_linf": 3.445411404764256,
+    "sol_rel_l2": 2.453142105748149,
+    "residual_l2": 83.74341308759128,
+    "train_time_s": 12.082985600000029,
+    "epochs_run": 1220
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 43,
+    "sol_linf": 3.126341773215365,
+    "sol_rel_l2": 2.158579048470464,
+    "residual_l2": 87.4047467878223,
+    "train_time_s": 6.958537400000068,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 44,
+    "sol_linf": 3.4097391668901205,
+    "sol_rel_l2": 2.4211969805067066,
+    "residual_l2": 83.9431107994079,
+    "train_time_s": 12.216331599999876,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 45,
+    "sol_linf": 3.640581764266913,
+    "sol_rel_l2": 2.6496511138953633,
+    "residual_l2": 83.39593127062719,
+    "train_time_s": 21.9973923,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 46,
+    "sol_linf": 2.8596238095613997,
+    "sol_rel_l2": 1.9203620158814365,
+    "residual_l2": 87.29986284288333,
+    "train_time_s": 6.794508300000189,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 47,
+    "sol_linf": 3.240449110435241,
+    "sol_rel_l2": 2.26596074584226,
+    "residual_l2": 84.28683074170249,
+    "train_time_s": 11.895004499999914,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 48,
+    "sol_linf": 3.0330453500767476,
+    "sol_rel_l2": 2.08548558522208,
+    "residual_l2": 87.57443763121229,
+    "train_time_s": 7.034979400000111,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 49,
+    "sol_linf": 1.4372699466840824,
+    "sol_rel_l2": 1.165111544320211,
+    "residual_l2": 56.58517927991012,
+    "train_time_s": 11.983967899999925,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 50,
+    "sol_linf": 3.446019610559544,
+    "sol_rel_l2": 2.4621789054216427,
+    "residual_l2": 84.09823367144905,
+    "train_time_s": 12.024441400000114,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 51,
+    "sol_linf": 3.105826243321392,
+    "sol_rel_l2": 2.158699228354083,
+    "residual_l2": 77.91387119184404,
+    "train_time_s": 11.957664399999885,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 52,
+    "sol_linf": 3.4851976935014486,
+    "sol_rel_l2": 2.47599857213847,
+    "residual_l2": 85.1999511769624,
+    "train_time_s": 8.846483099999887,
+    "epochs_run": 891
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 53,
+    "sol_linf": 3.8750110477199042,
+    "sol_rel_l2": 2.847847239800005,
+    "residual_l2": 83.84923413890766,
+    "train_time_s": 12.042332500000157,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 54,
+    "sol_linf": 3.0460818649025243,
+    "sol_rel_l2": 2.1100952517075613,
+    "residual_l2": 74.98280403969044,
+    "train_time_s": 11.932612000000063,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 55,
+    "sol_linf": 3.204124822116672,
+    "sol_rel_l2": 2.2380247767259513,
+    "residual_l2": 86.6254981690721,
+    "train_time_s": 6.895769400000063,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 56,
+    "sol_linf": 3.908065637945124,
+    "sol_rel_l2": 2.884918842647096,
+    "residual_l2": 84.20658689977455,
+    "train_time_s": 11.90077559999986,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 57,
+    "sol_linf": 4.039313689545815,
+    "sol_rel_l2": 3.0011609294781634,
+    "residual_l2": 83.66797057466623,
+    "train_time_s": 21.762809699999934,
+    "epochs_run": 2200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 58,
+    "sol_linf": 3.9562108275383028,
+    "sol_rel_l2": 2.9440562639229526,
+    "residual_l2": 83.34516828843768,
+    "train_time_s": 17.42801970000005,
+    "epochs_run": 1724
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 59,
+    "sol_linf": 2.6710926070477825,
+    "sol_rel_l2": 1.7549556000439601,
+    "residual_l2": 88.15726666014801,
+    "train_time_s": 7.025161199999957,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 60,
+    "sol_linf": 3.318296741694499,
+    "sol_rel_l2": 2.33258312468103,
+    "residual_l2": 84.34478513253897,
+    "train_time_s": 11.939284799999996,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 10,
+    "seed": 61,
+    "sol_linf": 2.9435545730206383,
+    "sol_rel_l2": 1.99577730392529,
+    "residual_l2": 87.16776056851961,
+    "train_time_s": 6.840822800000069,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 42,
+    "sol_linf": 3.5834219729866805,
+    "sol_rel_l2": 2.584698045399377,
+    "residual_l2": 83.58060339690236,
+    "train_time_s": 9.469384799999943,
+    "epochs_run": 951
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 43,
+    "sol_linf": 4.114160036751559,
+    "sol_rel_l2": 3.0607227685519813,
+    "residual_l2": 84.85920654718525,
+    "train_time_s": 6.926566600000115,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 44,
+    "sol_linf": 3.6423386707763123,
+    "sol_rel_l2": 2.6417555430251567,
+    "residual_l2": 83.47910174676672,
+    "train_time_s": 10.862026700000115,
+    "epochs_run": 1086
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 45,
+    "sol_linf": 3.9460047096003974,
+    "sol_rel_l2": 2.9260929188294496,
+    "residual_l2": 84.31672995296495,
+    "train_time_s": 7.276219600000104,
+    "epochs_run": 731
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 46,
+    "sol_linf": 3.0501244435440062,
+    "sol_rel_l2": 2.110027170999945,
+    "residual_l2": 75.66074162150703,
+    "train_time_s": 6.989486100000022,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 47,
+    "sol_linf": 3.54232355037888,
+    "sol_rel_l2": 2.544570157738736,
+    "residual_l2": 84.05386122657717,
+    "train_time_s": 7.930649599999924,
+    "epochs_run": 807
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 48,
+    "sol_linf": 3.8975712445335375,
+    "sol_rel_l2": 2.863211083378511,
+    "residual_l2": 85.13093554298673,
+    "train_time_s": 6.831479499999887,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 49,
+    "sol_linf": 2.5830723502839543,
+    "sol_rel_l2": 1.851521191505809,
+    "residual_l2": 59.306690440886115,
+    "train_time_s": 7.947091300000011,
+    "epochs_run": 804
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 50,
+    "sol_linf": 3.610048798319322,
+    "sol_rel_l2": 2.6153743624096957,
+    "residual_l2": 83.47285910302499,
+    "train_time_s": 11.77195740000002,
+    "epochs_run": 1177
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 51,
+    "sol_linf": 3.6151910102333846,
+    "sol_rel_l2": 2.6137477008956846,
+    "residual_l2": 83.57049971979744,
+    "train_time_s": 12.089087400000153,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 52,
+    "sol_linf": 3.986854633687922,
+    "sol_rel_l2": 2.9274869509705805,
+    "residual_l2": 84.93368539332391,
+    "train_time_s": 7.346950699999979,
+    "epochs_run": 733
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 53,
+    "sol_linf": 3.602435499821639,
+    "sol_rel_l2": 2.6438194920579376,
+    "residual_l2": 73.86888907697414,
+    "train_time_s": 11.93518129999984,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 54,
+    "sol_linf": 3.663864292190497,
+    "sol_rel_l2": 2.653962812084978,
+    "residual_l2": 83.68944223799092,
+    "train_time_s": 11.843278300000065,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 55,
+    "sol_linf": 3.9054978698482,
+    "sol_rel_l2": 2.870995909618425,
+    "residual_l2": 84.40485854047753,
+    "train_time_s": 6.926793500000031,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 56,
+    "sol_linf": 2.316459397698581,
+    "sol_rel_l2": 1.6630378705340234,
+    "residual_l2": 58.49883239456251,
+    "train_time_s": 6.807358000000022,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 57,
+    "sol_linf": 3.9328735679377997,
+    "sol_rel_l2": 2.9039322211630227,
+    "residual_l2": 84.54197365950597,
+    "train_time_s": 6.936587700000018,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 58,
+    "sol_linf": 3.8139267772426093,
+    "sol_rel_l2": 2.8227751566721673,
+    "residual_l2": 83.16413412596627,
+    "train_time_s": 17.48905109999987,
+    "epochs_run": 1743
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 59,
+    "sol_linf": 1.4111716612600742,
+    "sol_rel_l2": 1.306842219967779,
+    "residual_l2": 48.25585852818783,
+    "train_time_s": 16.900030499999957,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 60,
+    "sol_linf": 3.6766263618926454,
+    "sol_rel_l2": 2.6651707962814504,
+    "residual_l2": 84.03768799200188,
+    "train_time_s": 8.47537280000006,
+    "epochs_run": 859
+  },
+  {
+    "layers": 2,
+    "neurons": 20,
+    "seed": 61,
+    "sol_linf": 3.6446688449349227,
+    "sol_rel_l2": 2.6269416557183476,
+    "residual_l2": 84.1415037319553,
+    "train_time_s": 6.908393599999954,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 42,
+    "sol_linf": 3.1262087611572,
+    "sol_rel_l2": 2.370016466476651,
+    "residual_l2": 65.34619946039741,
+    "train_time_s": 17.09411820000014,
+    "epochs_run": 1700
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 43,
+    "sol_linf": 4.310841590621928,
+    "sol_rel_l2": 3.2703135229246616,
+    "residual_l2": 84.02747608878376,
+    "train_time_s": 7.079105499999969,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 44,
+    "sol_linf": 3.9111331313838447,
+    "sol_rel_l2": 2.90310185682998,
+    "residual_l2": 83.82393650182534,
+    "train_time_s": 7.2386798,
+    "epochs_run": 727
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 45,
+    "sol_linf": 3.841579517721125,
+    "sol_rel_l2": 2.833558237655542,
+    "residual_l2": 83.87755010343109,
+    "train_time_s": 7.187916800000039,
+    "epochs_run": 720
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 46,
+    "sol_linf": 3.5936246192421737,
+    "sol_rel_l2": 2.585892715028725,
+    "residual_l2": 83.93908191684729,
+    "train_time_s": 6.933560399999806,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 47,
+    "sol_linf": 2.8426492200734703,
+    "sol_rel_l2": 2.1170523214760673,
+    "residual_l2": 75.17303915910854,
+    "train_time_s": 11.844201799999837,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 48,
+    "sol_linf": 4.006943916985324,
+    "sol_rel_l2": 2.9840492913632684,
+    "residual_l2": 84.10929873940842,
+    "train_time_s": 6.882693599999811,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 49,
+    "sol_linf": 1.8450269101266568,
+    "sol_rel_l2": 1.509875599420844,
+    "residual_l2": 50.945107670307756,
+    "train_time_s": 7.117094799999904,
+    "epochs_run": 720
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 50,
+    "sol_linf": 3.1988238822851893,
+    "sol_rel_l2": 2.264713001712483,
+    "residual_l2": 74.232206382456,
+    "train_time_s": 11.872371200000089,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 51,
+    "sol_linf": 3.042356514930373,
+    "sol_rel_l2": 2.168536608505875,
+    "residual_l2": 66.78833556826415,
+    "train_time_s": 11.70538190000002,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 52,
+    "sol_linf": 3.4618055431004375,
+    "sol_rel_l2": 2.474595206203624,
+    "residual_l2": 83.64576925347974,
+    "train_time_s": 12.373824000000013,
+    "epochs_run": 1273
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 53,
+    "sol_linf": 3.2676073836895836,
+    "sol_rel_l2": 2.3834606892793024,
+    "residual_l2": 67.65019312303723,
+    "train_time_s": 10.331818399999975,
+    "epochs_run": 1200
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 54,
+    "sol_linf": 1.6688894043942333,
+    "sol_rel_l2": 1.3336141125215073,
+    "residual_l2": 51.12209291320863,
+    "train_time_s": 10.445056499999964,
+    "epochs_run": 1204
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 55,
+    "sol_linf": 3.8989821284999335,
+    "sol_rel_l2": 2.8734844114751135,
+    "residual_l2": 84.05550829928228,
+    "train_time_s": 5.967623200000162,
+    "epochs_run": 700
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 56,
+    "sol_linf": 1.6463537891623454,
+    "sol_rel_l2": 1.5035675136072353,
+    "residual_l2": 51.314060077309634,
+    "train_time_s": 5.523128300000053,
+    "epochs_run": 629
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 57,
+    "sol_linf": 3.7061344757537293,
+    "sol_rel_l2": 2.7142801411783055,
+    "residual_l2": 83.32762278063281,
+    "train_time_s": 10.740053399999852,
+    "epochs_run": 1234
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 58,
+    "sol_linf": 2.577597859517883,
+    "sol_rel_l2": 1.914041839499116,
+    "residual_l2": 56.056002069146096,
+    "train_time_s": 10.853289700000005,
+    "epochs_run": 1251
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 59,
+    "sol_linf": 1.4313865771825123,
+    "sol_rel_l2": 1.390270975478676,
+    "residual_l2": 49.65021083489065,
+    "train_time_s": 5.595064500000035,
+    "epochs_run": 655
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 60,
+    "sol_linf": 3.940614199349216,
+    "sol_rel_l2": 2.9209463038111996,
+    "residual_l2": 83.73816646721801,
+    "train_time_s": 6.297225799999978,
+    "epochs_run": 720
+  },
+  {
+    "layers": 2,
+    "neurons": 40,
+    "seed": 61,
+    "sol_linf": 3.2286911699407295,
+    "sol_rel_l2": 2.309823178786566,
+    "residual_l2": 73.60929723249514,
+    "train_time_s": 6.107284000000163,
+    "epochs_run": 700
+  }
+]
