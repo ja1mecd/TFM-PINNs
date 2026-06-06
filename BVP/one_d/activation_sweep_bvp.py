@@ -47,6 +47,7 @@ from activation_stats_bvp import (
     aggregate,
     save_json,
 )
+import pinn_bvpsolver_l2 as bvp
 from pinn_bvpsolver_l2 import (
     NeuralNetwork,
     PINN_BVP_Solver,
@@ -74,6 +75,23 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def set_problem_wavenumber(k: float) -> None:
+    """Repoint the BVP wavenumber on the shared solver module at runtime.
+
+    ``f`` and ``u_exact`` read ``K_WAVENUMBER`` from module globals at call
+    time, so rebinding it (and the homogeneous-Dirichlet endpoints derived
+    from it) repoints the whole problem -- forcing, exact solution and the
+    metric grids -- without editing the shared ``k=4`` solver that the
+    optimiser-comparison figures depend on.
+
+    The default ``k=1`` problem is Adam-trainable, so activation differences
+    are the discriminating factor; ``k=4`` is the high-frequency benchmark
+    that Adam alone cannot solve (every cell would be flagged as failed).
+    """
+    bvp.K_WAVENUMBER = float(k)
+    bvp.alpha, bvp.beta = bvp.u_exact(bvp.a), bvp.u_exact(bvp.b)
 
 
 @contextmanager
@@ -132,6 +150,10 @@ def parse_args() -> argparse.Namespace:
         description="Multi-seed activation sweep for the 1D BVP."
     )
     p.add_argument("--activation", choices=list(ACTIVATIONS), default="Tanh")
+    p.add_argument("--wavenumber", type=float, default=1.0,
+                   help="Wavenumber k of -u''=(k pi)^2 sin(k pi x). Default 1 "
+                        "(Adam-trainable, so activations separate); k=4 is the "
+                        "high-frequency benchmark Adam alone cannot solve.")
     p.add_argument("--layers", type=int, nargs="+",
                    default=[1, 2, 3, 4, 5, 6, 7])
     p.add_argument("--neurons", type=int, nargs="+",
@@ -234,6 +256,7 @@ def _train_one(args: argparse.Namespace, activation_factory,
 
 def run_sweep(args: argparse.Namespace) -> list[BVPCellResult]:
     activation_factory = ACTIVATIONS[args.activation]
+    set_problem_wavenumber(args.wavenumber)
     seeds = list(range(args.seed_base, args.seed_base + args.n_seeds))
     n_cells = len(args.layers) * len(args.neurons)
 
@@ -249,7 +272,8 @@ def run_sweep(args: argparse.Namespace) -> list[BVPCellResult]:
         cells = []
         done_keys = set()
 
-    print(f"\nActivation sweep (1D BVP) — activation: {args.activation} — "
+    print(f"\nActivation sweep (1D BVP, k={args.wavenumber:g}) — "
+          f"activation: {args.activation} — "
           f"{n_cells} cells x {len(seeds)} seeds\n")
 
     done = 0

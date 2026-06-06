@@ -44,7 +44,7 @@ def build_summary(results_dir: str, activations: list[str],
     print(f"[summary] wrote {output_path}")
 
 
-def run(*, activations, layers, neurons, epochs, n_seeds,
+def run(*, activations, wavenumber, layers, neurons, epochs, n_seeds,
         collocation_points, patience, min_delta, moving_avg_window,
         train_split, resample_every, pde_l2_points, linf_points, l2_points,
         residual_points, lr, lambda_bc, lambda_pde, scheduler_patience,
@@ -64,7 +64,8 @@ def run(*, activations, layers, neurons, epochs, n_seeds,
             print(f"[resume] {act}: final JSON already present, skipping sweep")
             continue
         args = argparse.Namespace(
-            activation=act, layers=layers, neurons=neurons, epochs=epochs,
+            activation=act, wavenumber=wavenumber,
+            layers=layers, neurons=neurons, epochs=epochs,
             collocation_points=collocation_points, patience=patience,
             min_delta=min_delta, moving_avg_window=moving_avg_window,
             train_split=train_split, resample_every=resample_every,
@@ -90,6 +91,9 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Full 1D BVP activation study.")
     p.add_argument("--activations", nargs="+",
                    default=["Tanh", "Sigmoid", "ReLU", "Softmax"])
+    p.add_argument("--wavenumber", type=float, default=1.0,
+                   help="Wavenumber k of -u''=(k pi)^2 sin(k pi x). Default 1 "
+                        "(Adam-trainable); k=4 fails under Adam alone.")
     p.add_argument("--layers", type=int, nargs="+",
                    default=[1, 2, 3, 4, 5, 6, 7])
     p.add_argument("--neurons", type=int, nargs="+",
@@ -122,7 +126,8 @@ def main() -> None:
                         "in-progress one from its .partial.json checkpoint.")
     a = p.parse_args()
     raise SystemExit(run(
-        activations=a.activations, layers=a.layers, neurons=a.neurons,
+        activations=a.activations, wavenumber=a.wavenumber,
+        layers=a.layers, neurons=a.neurons,
         epochs=a.epochs, n_seeds=a.n_seeds,
         collocation_points=a.collocation_points, patience=a.patience,
         min_delta=a.min_delta, moving_avg_window=a.moving_avg_window,
