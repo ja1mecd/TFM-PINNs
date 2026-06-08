@@ -675,7 +675,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    model = NeuralNetwork(hidden_layers=(30,), activation=nn.Tanh())
+    model = NeuralNetwork(hidden_layers=(32, 32, 32), activation=nn.Tanh())
     print("\nNeural Network Architecture:\n", model, "\n")
     print(
         f"Variant: {args.variant} | loss_transform: {args.loss_transform} "

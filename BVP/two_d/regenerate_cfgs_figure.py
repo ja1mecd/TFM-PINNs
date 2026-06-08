@@ -33,7 +33,7 @@ GRID_N = 80  # same n as the original plot_results call
 
 
 def main() -> None:
-    model = NeuralNetwork(hidden_layers=(30,), activation=nn.Tanh())
+    model = NeuralNetwork(hidden_layers=(32, 32, 32), activation=nn.Tanh())
     state = torch.load(MODEL_PATH, map_location="cpu")
     model.load_state_dict(state)
     model.eval()

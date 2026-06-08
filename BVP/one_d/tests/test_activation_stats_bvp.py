@@ -116,7 +116,10 @@ def test_latex_summary_has_table_and_best_cell():
         failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
     )
     tex = to_latex_summary([sweep])
-    assert r"\begin{table}" in tex and r"\end{table}" in tex
+    # Split into two narrower tables (the combined 7-column table is too wide).
+    assert tex.count(r"\begin{table}") == 2 and tex.count(r"\end{table}") == 2
+    assert r"\label{tab:bvp-activation-summary}" in tex
+    assert r"\label{tab:bvp-activation-summary-diag}" in tex
     assert "Tanh" in tex
     assert "(1, 5)" in tex  # only cell, so it is the best
     assert r"(\pi)^2\sin(\pi x)" in tex  # k=1 caption drops the unit coefficient

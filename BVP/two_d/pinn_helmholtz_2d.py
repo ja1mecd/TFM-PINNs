@@ -139,7 +139,7 @@ class NeuralNetwork(nn.Module):
     Dirichlet ansatz used in the NLP and CFGS solvers.
     """
 
-    def __init__(self, hidden_layers=(20, 20), activation=None) -> None:
+    def __init__(self, hidden_layers=(32, 32, 32), activation=None) -> None:
         super().__init__()
         activation = activation if activation is not None else nn.Tanh()
         layers: list[nn.Module] = []
@@ -1061,17 +1061,17 @@ class PINN_Helmholtz_Solver:
 # =============================================================================
 # MAIN — Urban et al. (2025), Table 4 2DH rows
 # =============================================================================
-# Two configurations from the paper:
-#   "low":  (a1, a2) = (1, 4), k = 1 — 2 layers x 20 neurons, 20 000 iter,
-#                                      5 000 Adam, batch 10 000.
-#   "high": (a1, a2) = (6, 6), k = 1 — 3 layers x 30 neurons, 50 000 iter,
-#                                      5 000 Adam, batch 10 000.
+# Two problem configurations from the paper (wavenumbers/budgets). The network
+# is held at the project BVP standard 3x32 tanh for BOTH, overriding the paper's
+# per-config nets (low: 2x20, high: 3x30), so all BVP benchmarks share one net.
+#   "low":  (a1, a2) = (1, 4), k = 1 — 20 000 iter, 5 000 Adam, batch 10 000.
+#   "high": (a1, a2) = (6, 6), k = 1 — 50 000 iter, 5 000 Adam, batch 10 000.
 HELMHOLTZ_CONFIGS: dict[str, dict] = {
     "low": {
         "a1": 1,
         "a2": 4,
         "k": 1.0,
-        "hidden_layers": (20, 20),
+        "hidden_layers": (32, 32, 32),
         "n_epochs": 10000,
         "adam_epochs": 2000,
         "n_collocation": 10000,
@@ -1080,7 +1080,7 @@ HELMHOLTZ_CONFIGS: dict[str, dict] = {
         "a1": 6,
         "a2": 6,
         "k": 1.0,
-        "hidden_layers": (30, 30, 30),
+        "hidden_layers": (32, 32, 32),
         "n_epochs": 20000,
         "adam_epochs": 2000,
         "n_collocation": 10000,

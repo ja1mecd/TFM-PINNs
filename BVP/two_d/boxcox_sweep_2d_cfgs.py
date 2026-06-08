@@ -278,11 +278,13 @@ def write_summary(
     n_epochs: int,
     adam_epochs: int,
     seeds: tuple[int, ...],
+    hidden: tuple[int, ...] = (),
 ) -> None:
+    arch = "x".join(str(h) for h in hidden) if hidden else "?"
     lines: list[str] = []
     lines.append(
         f"CFGS (current-free Grad-Shafranov) Box-Cox sweep, "
-        f"variant={variant}, epochs={n_epochs} (adam={adam_epochs}), "
+        f"net={arch}, variant={variant}, epochs={n_epochs} (adam={adam_epochs}), "
         f"seeds={list(seeds)}\n\n"
     )
     lines.append(
@@ -342,7 +344,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--rad-pool-size", type=int, default=10000)
     p.add_argument("--rad-k1", type=float, default=1.0)
     p.add_argument("--rad-k2", type=float, default=1.0)
-    p.add_argument("--hidden", type=int, nargs="+", default=[30])
+    p.add_argument("--hidden", type=int, nargs="+", default=[32, 32, 32])
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--initial-scale", action="store_true")
     p.add_argument(
@@ -429,6 +431,7 @@ def main(argv: list[str] | None = None) -> None:
         variant=args.variant,
         n_epochs=args.epochs, adam_epochs=args.adam_epochs,
         seeds=seeds,
+        hidden=tuple(args.hidden),
     )
     plot_sweep(
         results=results,

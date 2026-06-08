@@ -173,7 +173,7 @@ def h_b(qmu: torch.Tensor) -> torch.Tensor:
 # Neural network P_theta(q, mu)
 # =============================================================================
 class NeuralNetwork(nn.Module):
-    def __init__(self, hidden_layers=(30,), activation=None) -> None:
+    def __init__(self, hidden_layers=(32, 32, 32), activation=None) -> None:
         super().__init__()
         activation = activation if activation is not None else nn.Tanh()
         layers: list[nn.Module] = []
@@ -974,8 +974,9 @@ def main() -> None:
     qn_H_on_cpu = False          # set True if OOM on GPU
     # ---------------------------------------------------
 
-    # Table 1 CFGS: 1 layer, 30 neurons, tanh.
-    model = NeuralNetwork(hidden_layers=(30,), activation=nn.Tanh())
+    # Project BVP standard: 3 layers x 32 neurons, tanh (held fixed across all
+    # BVP benchmarks). Urban et al. Table 1 CFGS used 1x30.
+    model = NeuralNetwork(hidden_layers=(32, 32, 32), activation=nn.Tanh())
     print("\nNeural Network Architecture:\n")
     print(model, "\n")
 

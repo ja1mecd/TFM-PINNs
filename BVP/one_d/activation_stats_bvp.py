@@ -277,50 +277,86 @@ def _best_cell(sweep: BVPSweepResult) -> tuple[int, int, int, int]:
 
 
 def to_latex_summary(sweeps: Sequence[BVPSweepResult]) -> str:
-    """Cross-activation summary table for the 1D BVP activation sweep.
+    r"""Cross-activation summary for the 1D BVP activation sweep, as two tables.
 
-    Columns: activation, best (L, W) by solution L-infinity, the three
-    metrics (mean +- std at that best cell), failed-cell count, mean time
-    per cell.
+    The combined seven-column table is too wide for the text block, so it is
+    split into two narrower tables printed one after the other. The first
+    (\label{tab:bvp-activation-summary}) carries the best architecture, the
+    solution $L^\infty$ and relative $L^2$ errors, and the failure count; the
+    second (\label{tab:bvp-activation-summary-diag}) carries the PDE residual
+    norm and the mean training time per cell, for the same best cells.
     """
-    lines = [
-        r"\begin{table}[htbp]",
-        r"\centering",
-        r"\small",
-        r"\begin{tabular}{lccccccc}",
-        r"\hline",
-        r"Activation & Best $(L,W)$ & $\varepsilon_\infty$ & "
-        r"$\varepsilon^{\mathrm{rel}}_{L^2}$ & $\|\widehat{u}_\theta''-f\|_{L^2}$ "
-        r"& Failed & Time/cell [s] \\",
-        r"\hline",
-    ]
     # Drop the redundant unit coefficient so k=1 reads "\pi", not "1\pi".
     k = sweeps[0].wavenumber
     k_str = "" if k == 1.0 else f"{k:g}"
+
+    # One pass: best cell and aggregates per activation, reused by both tables.
+    rows = []
     for sw in sweeps:
         i, j, L, W = _best_cell(sw)
         total = len(sw.layers) * len(sw.neurons)
         failed = sum(sum(row) for row in sw.n_failed)
         time_all = [t for row in sw.time_mean for t in row if math.isfinite(t)]
         tmean = sum(time_all) / len(time_all) if time_all else float("nan")
+        rows.append({
+            "name": _escape_latex(sw.activation),
+            "LW": f"({L}, {W})",
+            "linf": _fmt_pm(sw.sol_linf_mean[i][j], sw.sol_linf_std[i][j]),
+            "rel": _fmt_pm(sw.sol_rel_l2_mean[i][j], sw.sol_rel_l2_std[i][j]),
+            "res": _fmt_pm(sw.residual_l2_mean[i][j], sw.residual_l2_std[i][j]),
+            "failed": f"{failed}/{total}",
+            "time": f"{tmean:.2f}",
+        })
+
+    lines = [
+        # --- Table 1: best architecture + solution errors + failure count ---
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\small",
+        r"\begin{tabular}{lcccc}",
+        r"\hline",
+        r"Activation & Best $(L,W)$ & $\varepsilon_\infty$ & "
+        r"$\varepsilon^{\mathrm{rel}}_{L^2}$ & Failed \\",
+        r"\hline",
+    ]
+    for r in rows:
         lines.append(
-            f"{_escape_latex(sw.activation)} & ({L}, {W}) & "
-            f"{_fmt_pm(sw.sol_linf_mean[i][j], sw.sol_linf_std[i][j])} & "
-            f"{_fmt_pm(sw.sol_rel_l2_mean[i][j], sw.sol_rel_l2_std[i][j])} & "
-            f"{_fmt_pm(sw.residual_l2_mean[i][j], sw.residual_l2_std[i][j])} & "
-            f"{failed}/{total} & {tmean:.2f} \\\\"
+            f"{r['name']} & {r['LW']} & {r['linf']} & {r['rel']} & "
+            f"{r['failed']} \\\\"
         )
     lines += [
         r"\hline",
         r"\end{tabular}",
         rf"\caption{{One-dimensional BVP $-u''=({k_str}\pi)^2\sin({k_str}\pi x)$"
-        r": best "
-        r"architecture per activation over the $L\in\{1,\ldots,7\}\times "
-        r"W\in\{5,10,20,40,80\}$ grid, with solution $L^\infty$ error, "
-        r"relative $L^2$ error and PDE residual $L^2$ norm (mean $\pm$ std "
-        r"over the seed ensemble), number of cells flagged as failed, and "
-        r"mean training time per cell.}",
+        r", solution errors: best architecture per activation over the "
+        r"$L\in\{1,\ldots,7\}\times W\in\{5,10,20,40,80\}$ grid, with solution "
+        r"$L^\infty$ error $\varepsilon_\infty$ and relative $L^2$ error "
+        r"$\varepsilon^{\mathrm{rel}}_{L^2}$ (mean $\pm$ std over the seed "
+        r"ensemble) at the best cell, and the number of cells flagged as "
+        r"failed. Residual norm and timing for the same runs are in "
+        r"Table~\ref{tab:bvp-activation-summary-diag}.}",
         r"\label{tab:bvp-activation-summary}",
+        r"\end{table}",
+        "",
+        # --- Table 2: PDE residual norm + mean training time ---
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\small",
+        r"\begin{tabular}{lcc}",
+        r"\hline",
+        r"Activation & $\|\widehat{u}_\theta''-f\|_{L^2}$ & Time/cell [s] \\",
+        r"\hline",
+    ]
+    for r in rows:
+        lines.append(f"{r['name']} & {r['res']} & {r['time']} \\\\")
+    lines += [
+        r"\hline",
+        r"\end{tabular}",
+        r"\caption{Companion to Table~\ref{tab:bvp-activation-summary}: "
+        r"PDE residual $L^2$ norm $\|\widehat{u}_\theta''-f\|_{L^2}$ (mean "
+        r"$\pm$ std over the seed ensemble) at the best cell, and mean "
+        r"training time per cell, for the same activation runs.}",
+        r"\label{tab:bvp-activation-summary-diag}",
         r"\end{table}",
         "",
     ]

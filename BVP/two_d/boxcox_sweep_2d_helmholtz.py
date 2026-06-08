@@ -255,11 +255,13 @@ def write_summary(
     n_epochs: int,
     adam_epochs: int,
     seeds: tuple[int, ...],
+    hidden: tuple[int, ...] = (),
 ) -> None:
+    arch = "x".join(str(h) for h in hidden) if hidden else "?"
     lines: list[str] = []
     lines.append(
         f"2D Helmholtz Box-Cox sweep, (a1, a2)=({a1}, {a2}), k={k:g}, "
-        f"qn={qn_variant}, epochs={n_epochs} (adam={adam_epochs}), "
+        f"net={arch}, qn={qn_variant}, epochs={n_epochs} (adam={adam_epochs}), "
         f"seeds={list(seeds)}\n\n"
     )
     lines.append(
@@ -316,7 +318,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--adam-epochs", type=int, default=2000,
                    help="Standardised fixed Adam warm-up before handover.")
     p.add_argument("--n-collocation", type=int, default=10000)
-    p.add_argument("--hidden", type=int, nargs="+", default=[20, 20])
+    p.add_argument("--hidden", type=int, nargs="+", default=[32, 32, 32])
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument(
         "--handover-strategy",
@@ -388,6 +390,7 @@ def main(argv: list[str] | None = None) -> None:
         qn_variant=args.qn_variant,
         n_epochs=args.epochs, adam_epochs=args.adam_epochs,
         seeds=seeds,
+        hidden=tuple(args.hidden),
     )
     plot_sweep(
         results=results,

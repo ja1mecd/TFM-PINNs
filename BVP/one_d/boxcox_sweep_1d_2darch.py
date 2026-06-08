@@ -2,12 +2,14 @@
 Box-Cox sweep on the 1D BVP using the *same protocol as the 2D sweeps*.
 
 This is the 1D counterpart of ``boxcox_sweep_2d_helmholtz.py`` /
-``boxcox_sweep_2d_cfgs.py``. Rather than the 1D-tuned network of
-``boxcox_sweep_1d_finegrained.py`` (3x32, 400 collocation points), this script
-reproduces the *exact* experimental protocol the 2D Helmholtz sweep uses, so
-the 1D and 2D Box-Cox results can be compared on equal footing:
+``boxcox_sweep_2d_cfgs.py``. All BVP benchmarks share the same standard
+network -- 3 hidden layers x 32 units, Tanh -- so this script differs from
+``boxcox_sweep_1d_finegrained.py`` not in architecture but in *protocol*: it
+runs the from-the-start (non-delayed) Box-Cox engagement on the larger 2D
+budget (10 000 collocation points, 10 000 epochs, 3 seeds), so the 1D and 2D
+Box-Cox results can be compared on equal footing:
 
-    * network          : 2 hidden layers x 20 units, Tanh   (2D Helmholtz net)
+    * network          : 3 hidden layers x 32 units, Tanh   (BVP standard)
     * collocation      : 10 000 points
     * budget           : 10 000 epochs (2000 fixed Adam -> SSBroyden)
     * optimiser        : Adam (lr 1e-3) -> SSBroyden
@@ -568,10 +570,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Matches the 2D Helmholtz protocol (10 000 points).")
     p.add_argument("--resample-every", type=int, default=500)
     p.add_argument("--train-split", type=float, default=0.8)
-    p.add_argument("--hidden", type=int, nargs="+", default=[20, 20],
-                   help="Hidden-layer widths. Default 2x20 == the 2D Helmholtz "
-                        "network, so the 1D and 2D Box-Cox sweeps share an "
-                        "architecture.")
+    p.add_argument("--hidden", type=int, nargs="+", default=[32, 32, 32],
+                   help="Hidden-layer widths. Default 3x32 is the standard BVP "
+                        "architecture used by every 1D and 2D benchmark, so all "
+                        "Box-Cox sweeps share one network.")
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--diag-grid-n", type=int, default=400,
                    help="Grid resolution for the 1D solution-error diagnostics.")
