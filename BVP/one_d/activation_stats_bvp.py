@@ -82,6 +82,7 @@ class BVPSweepResult:
     row-major grid indexed ``[i_layers][j_neurons]``.
     """
     activation: str
+    wavenumber: float
     layers: tuple[int, ...]
     neurons: tuple[int, ...]
     seeds: tuple[int, ...]
@@ -133,6 +134,7 @@ def aggregate(
     *,
     failure_log_threshold: float,
     machine_eps: float,
+    wavenumber: float = 1.0,
 ) -> BVPSweepResult:
     """Build a BVPSweepResult from raw per-seed cells. Never mutates input."""
     layers = list(layers)
@@ -167,6 +169,7 @@ def aggregate(
 
     return BVPSweepResult(
         activation=activation,
+        wavenumber=float(wavenumber),
         layers=tuple(layers),
         neurons=tuple(neurons),
         seeds=tuple(seeds),
@@ -209,6 +212,8 @@ def load_json(path: str) -> BVPSweepResult:
         cells = tuple(BVPCellResult(**c) for c in d["cells"])
         return BVPSweepResult(
             activation=d["activation"],
+            # pre-wavenumber JSONs were all k=1 runs (Adam cannot train k=4).
+            wavenumber=float(d.get("wavenumber", 1.0)),
             layers=tuple(d["layers"]),
             neurons=tuple(d["neurons"]),
             seeds=tuple(d["seeds"]),
@@ -289,6 +294,9 @@ def to_latex_summary(sweeps: Sequence[BVPSweepResult]) -> str:
         r"& Failed & Time/cell [s] \\",
         r"\hline",
     ]
+    # Drop the redundant unit coefficient so k=1 reads "\pi", not "1\pi".
+    k = sweeps[0].wavenumber
+    k_str = "" if k == 1.0 else f"{k:g}"
     for sw in sweeps:
         i, j, L, W = _best_cell(sw)
         total = len(sw.layers) * len(sw.neurons)
@@ -305,7 +313,8 @@ def to_latex_summary(sweeps: Sequence[BVPSweepResult]) -> str:
     lines += [
         r"\hline",
         r"\end{tabular}",
-        r"\caption{One-dimensional BVP $-u''=(4\pi)^2\sin(4\pi x)$: best "
+        rf"\caption{{One-dimensional BVP $-u''=({k_str}\pi)^2\sin({k_str}\pi x)$"
+        r": best "
         r"architecture per activation over the $L\in\{1,\ldots,7\}\times "
         r"W\in\{5,10,20,40,80\}$ grid, with solution $L^\infty$ error, "
         r"relative $L^2$ error and PDE residual $L^2$ norm (mean $\pm$ std "

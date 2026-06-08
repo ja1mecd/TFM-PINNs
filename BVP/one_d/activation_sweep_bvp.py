@@ -394,6 +394,7 @@ def persist(args: argparse.Namespace, cells: list[BVPCellResult]) -> str:
         cells=cells,
         failure_log_threshold=args.failure_log_threshold,
         machine_eps=MACHINE_EPS,
+        wavenumber=args.wavenumber,
     )
     os.makedirs(args.results_dir, exist_ok=True)
     json_path = os.path.join(

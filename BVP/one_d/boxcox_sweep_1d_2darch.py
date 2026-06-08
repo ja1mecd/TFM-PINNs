@@ -76,10 +76,46 @@ class SeedResult:
     sol_l2: np.ndarray
 
 
+# A seed counts as successful iff its final relative L^2 error sits below this
+# threshold. At k = 4 the failure mode is binary: a seed either escapes the
+# Adam plateau (relL2 ~ 1e-5) or stays on it (relL2 ~ 1, the trivial zero
+# predictor, since ||u_exact||_{L^2} = sqrt(1/2) for u = sin(4 pi x) on [0,1]).
+# 1.0 puts the cut-off just below that stuck value, so the conditional
+# aggregates and trajectories report only the seeds that actually trained.
+# This is what keeps a single escaping seed at, e.g., lambda = 0.7 from
+# producing a misleading "partial improvement" in the unconditional mean.
+SUCCESS_REL_L2_DEFAULT: float = 1.0
+
+
+def is_successful(s: SeedResult, rel_l2_threshold: float) -> bool:
+    """True iff the final iterate beats the configured rel. L^2 threshold."""
+    return bool(np.isfinite(s.final_sol_rel_l2)) and (
+        s.final_sol_rel_l2 < rel_l2_threshold
+    )
+
+
 @dataclass(frozen=True)
 class LambdaResult:
     lambda_: float
     seeds: tuple[SeedResult, ...]
+
+    def successful(self, rel_l2_threshold: float) -> tuple[SeedResult, ...]:
+        return tuple(s for s in self.seeds if is_successful(s, rel_l2_threshold))
+
+    def cond_stats(
+        self, attr: str, rel_l2_threshold: float
+    ) -> tuple[int, float, float]:
+        """Return (n_success, mean, std) over the successful seeds.
+
+        If no seed succeeded, returns (0, NaN, NaN). NaN-not-zero keeps
+        matplotlib's log axes from auto-extending to absurd decades when a
+        lambda has no successful run.
+        """
+        succ = self.successful(rel_l2_threshold)
+        if not succ:
+            return 0, float("nan"), float("nan")
+        vals = [getattr(s, attr) for s in succ]
+        return len(succ), float(np.mean(vals)), float(np.std(vals))
 
 
 def run_one(
@@ -277,6 +313,143 @@ def plot_sweep(
     print(f"Saved sweep figure to: {out_path}")
 
 
+def _log_safe_yerr(means: np.ndarray, stds: np.ndarray) -> np.ndarray:
+    """Convert symmetric ``mean +- std`` into asymmetric whiskers that never
+    reach <=0 on a log axis. Returns a 2xN array suitable for ``yerr=``.
+
+    When std > mean the lower whisker would otherwise be non-positive;
+    matplotlib silently clips it and the axis auto-limits blow up. Capping
+    the lower whisker at 0.95*mean keeps it strictly positive. NaN cells
+    (lambda with zero successful seeds) get yerr=0; the accompanying NaN
+    ``means`` value makes matplotlib skip drawing.
+    """
+    m = np.asarray(means, dtype=float)
+    s = np.asarray(stds, dtype=float)
+    lo = np.where(np.isfinite(m), np.minimum(s, 0.95 * np.abs(m)), 0.0)
+    hi = np.where(np.isfinite(m), s, 0.0)
+    return np.vstack([lo, hi])
+
+
+def plot_sweep_conditioned(
+    results: tuple[LambdaResult, ...],
+    out_path: str,
+    k: float,
+    hidden: tuple[int, ...],
+    adam_epochs: int,
+    rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
+) -> None:
+    """Success-conditioned counterpart of ``plot_sweep``.
+
+    Failed seeds (final rel.L^2 >= ``rel_l2_threshold``) are excluded from
+    every aggregate; lambdas with zero successful seeds get a "k/N" annotation
+    in the bar panels and no trajectory in the line panels. This is the honest
+    representation of the binary escape-the-plateau outcome at k = 4, where the
+    unconditional mean averages two distinct populations.
+    """
+    fig, ax = plt.subplots(2, 2, figsize=(15, 10))
+    cmap = plt.get_cmap("viridis")
+    n = len(results)
+    success_counts: list[tuple[int, int]] = []
+
+    for i, lr in enumerate(results):
+        c = cmap(i / max(n - 1, 1))
+        succ = lr.successful(rel_l2_threshold)
+        n_succ, n_total = len(succ), len(lr.seeds)
+        success_counts.append((n_succ, n_total))
+        succ_tag = f" [{n_succ}/{n_total}]"
+        if n_succ == 0:
+            ax[0, 0].plot([], [], color=c, linewidth=1.4,
+                          label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
+            ax[0, 1].plot([], [], color=c, linewidth=1.4,
+                          label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
+            continue
+        H = _pad_and_stack([s.J_val for s in succ])
+        ax[0, 0].semilogy(np.nanmean(H, axis=0), color=c, linewidth=1.4,
+                          label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
+        S = _pad_and_stack([s.sol_l2 for s in succ])
+        ax[0, 1].semilogy(np.nanmean(S, axis=0), color=c, linewidth=1.4,
+                          label=rf"$\lambda={lr.lambda_:g}${succ_tag}")
+
+    arch = "x".join(str(h) for h in hidden)
+    ax[0, 0].axvline(adam_epochs, color="k", linestyle=":", alpha=0.5,
+                     label="Adam$\\to$SSBroyden")
+    ax[0, 0].set_xlabel("Epoch")
+    ax[0, 0].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$ (mean over successful seeds)")
+    ax[0, 0].set_title(
+        f"1D BVP, k={k:g}, net {arch} (2D protocol); successful seeds only "
+        f"(rel.$L^2<{rel_l2_threshold:g}$)"
+    )
+    ax[0, 0].grid(True, alpha=0.3)
+    ax[0, 0].legend(fontsize=8, ncol=2)
+
+    ax[0, 1].axvline(adam_epochs, color="k", linestyle=":", alpha=0.5)
+    ax[0, 1].set_xlabel("Epoch")
+    ax[0, 1].set_ylabel(r"$\|\widehat{u} - u^\star\|_{L^2}$")
+    ax[0, 1].set_title("Solution error trajectory (successful seeds)")
+    ax[0, 1].grid(True, alpha=0.3)
+    ax[0, 1].legend(fontsize=8, ncol=2)
+
+    lams = np.asarray([r.lambda_ for r in results])
+    cond_J = [r.cond_stats("final_J_val", rel_l2_threshold) for r in results]
+    means_J = np.asarray([m for _, m, _ in cond_J], dtype=float)
+    stds_J = np.asarray([s for _, _, s in cond_J], dtype=float)
+    cond_S = [r.cond_stats("final_sol_l2", rel_l2_threshold) for r in results]
+    means_S = np.asarray([m for _, m, _ in cond_S], dtype=float)
+    stds_S = np.asarray([s for _, _, s in cond_S], dtype=float)
+
+    def _set_log_ylim(axis: plt.Axes, means: np.ndarray, stds: np.ndarray) -> None:
+        m = np.asarray(means, dtype=float)
+        s = np.asarray(stds, dtype=float)
+        mask = np.isfinite(m)
+        if not mask.any():
+            return
+        lo_cand = np.maximum(m[mask] - np.minimum(s[mask], 0.95 * m[mask]),
+                             m[mask] * 0.05)
+        hi_cand = m[mask] + s[mask]
+        lo, hi = float(np.min(lo_cand)), float(np.max(hi_cand))
+        if lo <= 0 or not np.isfinite(lo) or not np.isfinite(hi):
+            return
+        axis.set_ylim(lo / np.sqrt(10.0), hi * np.sqrt(10.0))
+
+    def _annotate_empty(axis: plt.Axes, means: np.ndarray) -> None:
+        y_lo, _ = axis.get_ylim()
+        for lam_val, m, (n_succ, n_total) in zip(lams, means, success_counts):
+            if np.isfinite(m):
+                continue
+            axis.text(lam_val, y_lo * 3, f"{n_succ}/{n_total}",
+                      ha="center", va="bottom", fontsize=8, color="dimgray")
+
+    ax[1, 0].errorbar(lams, means_J, yerr=_log_safe_yerr(means_J, stds_J),
+                      fmt="o-", color="C3", capsize=3,
+                      label=r"final $\mathcal{J}_{\mathrm{val}}$ mean $\pm$ std (successful seeds)")
+    ax[1, 0].set_yscale("log")
+    ax[1, 0].set_xlabel(r"Box-Cox $\lambda$")
+    ax[1, 0].set_ylabel(r"final $\mathcal{J}_{\mathrm{val}}$")
+    ax[1, 0].grid(True, alpha=0.3)
+    ax[1, 0].legend(fontsize=9)
+    ax[1, 0].set_title("Final residual vs lambda (successful seeds)")
+    _set_log_ylim(ax[1, 0], means_J, stds_J)
+    _annotate_empty(ax[1, 0], means_J)
+
+    ax[1, 1].errorbar(lams, means_S, yerr=_log_safe_yerr(means_S, stds_S),
+                      fmt="s-", color="C0", capsize=3,
+                      label=r"final $\|u-u^*\|_{L^2}$ mean $\pm$ std (successful seeds)")
+    ax[1, 1].set_yscale("log")
+    ax[1, 1].set_xlabel(r"Box-Cox $\lambda$")
+    ax[1, 1].set_ylabel(r"final solution $L^2$ error")
+    ax[1, 1].grid(True, alpha=0.3)
+    ax[1, 1].legend(fontsize=9)
+    ax[1, 1].set_title("Solution error vs lambda (successful seeds)")
+    _set_log_ylim(ax[1, 1], means_S, stds_S)
+    _annotate_empty(ax[1, 1], means_S)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved success-conditioned figure to: {out_path}")
+
+
 def write_summary(
     results: tuple[LambdaResult, ...],
     out_path: str,
@@ -287,14 +460,21 @@ def write_summary(
     adam_epochs: int,
     n_collocation: int,
     seeds: tuple[int, ...],
+    rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
 ) -> None:
     arch = "x".join(str(h) for h in hidden)
     lines: list[str] = []
     lines.append(
         f"1D BVP Box-Cox sweep (2D protocol), k={k:g}, net={arch}, "
         f"n_collocation={n_collocation}, qn={qn_variant}, "
-        f"epochs={n_epochs} (adam={adam_epochs}), seeds={list(seeds)}\n\n"
+        f"epochs={n_epochs} (adam={adam_epochs}), seeds={list(seeds)}\n"
     )
+    lines.append(
+        f"Success criterion: final relative L^2 error < {rel_l2_threshold:g}.\n\n"
+    )
+
+    # --- Unconditional aggregates (mean over ALL seeds; 2D-comparable) -------
+    lines.append("== Unconditional aggregates (all seeds) ==\n")
     lines.append(
         f"{'lambda':>8}   "
         f"{'mean J':>14}  {'std J':>14}    "
@@ -309,6 +489,42 @@ def write_summary(
             f"{r.lambda_:>8.4g}   {mJ:>14.4e}  {sJ:>14.4e}    "
             f"{mS:>14.4e}  {sS:>14.4e}\n"
         )
+
+    # --- Conditional aggregates (successful seeds only) ----------------------
+    lines.append("\n== Aggregates over successful seeds only ==\n")
+    lines.append(
+        f"{'lambda':>8}  {'n_succ':>8}  "
+        f"{'mean J':>14}  {'std J':>14}    "
+        f"{'mean solL2':>14}  {'std solL2':>14}\n"
+    )
+    for r in results:
+        nJ, mJ, sJ = r.cond_stats("final_J_val", rel_l2_threshold)
+        _, mS, sS = r.cond_stats("final_sol_l2", rel_l2_threshold)
+        n_total = len(r.seeds)
+        mJ_s = "n/a" if not np.isfinite(mJ) else f"{mJ:.4e}"
+        sJ_s = "n/a" if not np.isfinite(sJ) else f"{sJ:.4e}"
+        mS_s = "n/a" if not np.isfinite(mS) else f"{mS:.4e}"
+        sS_s = "n/a" if not np.isfinite(sS) else f"{sS:.4e}"
+        lines.append(
+            f"{r.lambda_:>8.4g}  {nJ:>3d}/{n_total:<3d}  "
+            f"{mJ_s:>14}  {sJ_s:>14}    {mS_s:>14}  {sS_s:>14}\n"
+        )
+
+    # --- Per-seed final metrics (the escape table) ---------------------------
+    lines.append("\n== Per-seed final metrics (all runs, including failures) ==\n")
+    lines.append(
+        f"{'lambda':>8}  {'seed':>6}  "
+        f"{'final J':>14}  {'final solL2':>14}  {'final relL2':>14}  status\n"
+    )
+    for r in results:
+        for s in r.seeds:
+            status = "ok" if is_successful(s, rel_l2_threshold) else "FAIL"
+            lines.append(
+                f"{r.lambda_:>8.4g}  {s.seed:>6d}  "
+                f"{s.final_J_val:>14.4e}  {s.final_sol_l2:>14.4e}  "
+                f"{s.final_sol_rel_l2:>14.4e}  {status}\n"
+            )
+
     text = "".join(lines)
     with open(out_path, "w") as fh:
         fh.write(text)
@@ -380,6 +596,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "SSBroyden engages. Set --patience >= --epochs to disable.",
     )
     p.add_argument("--results-dir", type=str, default=os.path.join("..", "results"))
+    p.add_argument(
+        "--success-rel-l2-threshold",
+        type=float,
+        default=SUCCESS_REL_L2_DEFAULT,
+        help=(
+            "Final relative L^2 error below which a seed counts as successful "
+            "(having escaped the Adam plateau). Default 1.0 (= the trivial "
+            "zero predictor). Drives the success-conditioned figure and the "
+            "conditional aggregates in the summary table."
+        ),
+    )
+    p.add_argument(
+        "--no-conditioned-plot",
+        dest="conditioned_plot",
+        action="store_false",
+        help="Skip the success-conditioned figure (emit only the "
+             "unconditional 2D-comparable one).",
+    )
+    p.set_defaults(conditioned_plot=True)
     return p.parse_args(argv)
 
 
@@ -437,6 +672,7 @@ def main(argv: list[str] | None = None) -> None:
         n_epochs=args.epochs, adam_epochs=args.adam_epochs,
         n_collocation=args.n_collocation,
         seeds=seeds,
+        rel_l2_threshold=args.success_rel_l2_threshold,
     )
     plot_sweep(
         results=results,
@@ -445,6 +681,15 @@ def main(argv: list[str] | None = None) -> None:
         hidden=hidden,
         adam_epochs=args.adam_epochs,
     )
+    if args.conditioned_plot:
+        plot_sweep_conditioned(
+            results=results,
+            out_path=os.path.join(out_dir, "boxcox_sweep_1d_2darch_conditioned.png"),
+            k=args.wavenumber,
+            hidden=hidden,
+            adam_epochs=args.adam_epochs,
+            rel_l2_threshold=args.success_rel_l2_threshold,
+        )
 
     np.savez(
         os.path.join(out_dir, "raw_histories.npz"),

@@ -32,8 +32,10 @@ def test_aggregate_means_and_std():
         activation="Tanh", layers=[1], neurons=[5],
         cells=_cells_two_by_one(),
         failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+        wavenumber=1.0,
     )
     assert isinstance(sweep, BVPSweepResult)
+    assert sweep.wavenumber == pytest.approx(1.0)
     assert sweep.sol_linf_mean[0][0] == pytest.approx(2e-2)
     # population std of {1e-2, 3e-2} = 1e-2
     assert sweep.sol_linf_std[0][0] == pytest.approx(1e-2)
@@ -117,3 +119,22 @@ def test_latex_summary_has_table_and_best_cell():
     assert r"\begin{table}" in tex and r"\end{table}" in tex
     assert "Tanh" in tex
     assert "(1, 5)" in tex  # only cell, so it is the best
+    assert r"(\pi)^2\sin(\pi x)" in tex  # k=1 caption drops the unit coefficient
+
+
+@pytest.mark.unit
+def test_load_defaults_wavenumber_for_legacy_json(tmp_path):
+    # A pre-wavenumber JSON (field absent) must still load, defaulting to k=1.
+    import json
+    from dataclasses import asdict
+    sweep = aggregate(
+        activation="Tanh", layers=[1], neurons=[5],
+        cells=_cells_two_by_one(),
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+        wavenumber=1.0,
+    )
+    payload = asdict(sweep)
+    del payload["wavenumber"]
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(payload))
+    assert load_json(str(path)).wavenumber == pytest.approx(1.0)
