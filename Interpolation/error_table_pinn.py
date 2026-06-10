@@ -182,11 +182,15 @@ def run_sweep(args: argparse.Namespace) -> list[CellResult]:
 def plot_heatmap(linf_mean: Sequence[Sequence[float]], layers: list[int],
                  neurons: list[int], activation: str,
                  output_path: str, vmin: float | None = None,
-                 vmax: float | None = None) -> None:
+                 vmax: float | None = None,
+                 fail_mask: Sequence[Sequence[int]] | None = None) -> None:
     """Render one log10-error heatmap.
 
     Pass a shared ``vmin``/``vmax`` (in log10 units) to put several panels on
     a common colour scale; left as ``None`` each panel auto-scales itself.
+    ``fail_mask`` is an optional 0/1 grid (same shape as ``linf_mean``);
+    cells flagged 1 are hatched to mark failure under the chapter-wide
+    relative-L2 success criterion.
     """
     arr = np.array(linf_mean, dtype=float)
     with np.errstate(divide="ignore"):
@@ -218,6 +222,14 @@ def plot_heatmap(linf_mean: Sequence[Sequence[float]], layers: list[int],
             color = "white" if val < thresh else "black"
             ax.text(j, i, f"{val:.2f}", ha="center", va="center",
                     color=color, fontsize=18)
+
+    if fail_mask is not None:
+        for i in range(len(layers)):
+            for j in range(len(neurons)):
+                if fail_mask[i][j]:
+                    ax.add_patch(plt.Rectangle(
+                        (j - 0.5, i - 0.5), 1.0, 1.0, fill=False,
+                        hatch="///", edgecolor="white", linewidth=0.0))
 
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label(r"$\log_{10} \varepsilon_\infty$ (mean over seeds)", fontsize=15)

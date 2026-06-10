@@ -93,15 +93,22 @@ def main() -> None:
                    help="Success cutoff on final relative L^2 error (default 0.1).")
     p.add_argument("--adam-warmup", type=int, default=2000)
     p.add_argument("--k", type=float, default=4.0)
+    p.add_argument("--portrait", action="store_true",
+                   help="Render the 2x2 grid in portrait geometry (9.5x13in) "
+                        "for full-page thesis figures; appends '_portrait' to "
+                        "the figure filename.")
     args = p.parse_args()
 
     results = reconstruct(args.results_dir)
     tag = f"thr{args.threshold:g}".replace(".", "p")
+    if args.portrait:
+        tag += "_portrait"
     fig_path = os.path.join(args.results_dir, f"optimiser_comparison_{tag}.png")
     sum_path = os.path.join(args.results_dir, f"summary_table_{tag}.txt")
 
+    figsize = (9.5, 13.0) if args.portrait else (14.0, 10.0)
     plot_comparison(results, fig_path, k=args.k, adam_warmup=args.adam_warmup,
-                    rel_l2_threshold=args.threshold)
+                    rel_l2_threshold=args.threshold, figsize=figsize)
     write_summary(results, sum_path, k=args.k, total_epochs=-1,
                   adam_warmup=args.adam_warmup, seeds=tuple(
                       int(s) for s in (results[0].seeds and

@@ -141,3 +141,32 @@ def test_load_defaults_wavenumber_for_legacy_json(tmp_path):
     path = tmp_path / "legacy.json"
     path.write_text(json.dumps(payload))
     assert load_json(str(path)).wavenumber == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_with_rell2_failures_majority_rule():
+    from activation_stats_bvp import with_rell2_failures
+
+    def cell(seed, rel):
+        return BVPCellResult(layers=1, neurons=5, seed=seed, sol_linf=rel,
+                             sol_rel_l2=rel, residual_l2=1.0,
+                             train_time_s=1.0, epochs_run=50)
+
+    # 3 of 4 seeds below 1e-2: strict majority succeeds -> not failed.
+    ok = aggregate(
+        activation="Tanh", layers=[1], neurons=[5],
+        cells=[cell(42, 1e-4), cell(43, 5e-3), cell(44, 9e-3), cell(45, 0.5)],
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+    )
+    assert with_rell2_failures(ok).n_failed[0][0] == 0
+
+    # 2 of 4 (exactly half) succeed: no strict majority -> failed.
+    tie = aggregate(
+        activation="Tanh", layers=[1], neurons=[5],
+        cells=[cell(42, 1e-4), cell(43, 5e-3), cell(44, 0.5), cell(45, 0.9)],
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+    )
+    assert with_rell2_failures(tie).n_failed[0][0] == 1
+
+    # A new object is returned; the input sweep is left untouched.
+    assert with_rell2_failures(tie) is not tie

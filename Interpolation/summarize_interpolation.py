@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 
-from interpolation_stats import load_json, to_latex_summary
+from interpolation_stats import load_json, to_latex_summary, with_rell2_failures
 
 DEFAULT_ACTIVATIONS = ["Tanh", "Sigmoid", "ReLU", "Softmax"]
 
@@ -30,7 +30,7 @@ def build_summary(results_dir: str, activations: list[str],
         if not os.path.exists(path):
             print(f"WARNING: {path} not found — skipping {act}")
             continue
-        sweeps.append(load_json(path))
+        sweeps.append(with_rell2_failures(load_json(path)))
     if not sweeps:
         raise FileNotFoundError(
             "No result JSONs found; run error_table_pinn.py first."

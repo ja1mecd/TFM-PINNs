@@ -20,9 +20,13 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, Sequence
+
+# Chapter-wide per-seed success cutoff on the relative L2 solution error
+# (thesis section 4.2.3): a run succeeds iff sol_rel_l2 < 1e-2.
+SUCCESS_REL_L2 = 1e-2
 
 # Metric registry: maps a metric key to the cell attribute, the aggregated
 # mean/std grid attributes on BVPSweepResult, a colour-bar / axis label
@@ -200,6 +204,37 @@ def _tuplify(x):
     return x
 
 
+def with_rell2_failures(
+    sweep: BVPSweepResult,
+    *,
+    success_rel_l2: float = SUCCESS_REL_L2,
+) -> BVPSweepResult:
+    """Return a copy of ``sweep`` with ``n_failed`` recomputed per seed.
+
+    A run succeeds iff its relative L2 solution error ``sol_rel_l2`` is
+    below ``success_rel_l2``; a cell is flagged failed (1) when no strict
+    majority of its seeds succeeds. This is the chapter-wide criterion of
+    thesis section 4.2.3, replacing the legacy mean-log10(linf) flag.
+    """
+    def cell_flag(pts: Sequence[BVPCellResult]) -> int:
+        n_succ = sum(
+            1 for c in pts
+            if math.isfinite(c.sol_rel_l2) and c.sol_rel_l2 < success_rel_l2
+        )
+        return int(2 * n_succ <= len(pts))
+
+    n_failed = []
+    for L in sweep.layers:
+        row = []
+        for W in sweep.neurons:
+            pts = [c for c in sweep.cells if c.layers == L and c.neurons == W]
+            if not pts:
+                raise ValueError(f"no cells for L={L}, W={W}")
+            row.append(cell_flag(pts))
+        n_failed.append(tuple(row))
+    return replace(sweep, n_failed=tuple(n_failed))
+
+
 def save_json(sweep: BVPSweepResult, path: str) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(asdict(sweep), fh, indent=2)
@@ -332,8 +367,9 @@ def to_latex_summary(sweeps: Sequence[BVPSweepResult]) -> str:
         r"$L\in\{1,\ldots,7\}\times W\in\{5,10,20,40,80\}$ grid, with solution "
         r"$L^\infty$ error $\varepsilon_\infty$ and relative $L^2$ error "
         r"$\varepsilon^{\mathrm{rel}}_{L^2}$ (mean $\pm$ std over the seed "
-        r"ensemble) at the best cell, and the number of cells flagged as "
-        r"failed. Residual norm and timing for the same runs are in "
+        r"ensemble) at the best cell, and the number of failed cells (no "
+        r"majority of seeds reaches $\varepsilon^{\mathrm{rel}}_{L^2}<10^{-2}$). "
+        r"Residual norm and timing for the same runs are in "
         r"Table~\ref{tab:bvp-activation-summary-diag}.}",
         r"\label{tab:bvp-activation-summary}",
         r"\end{table}",

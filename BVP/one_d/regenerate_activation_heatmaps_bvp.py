@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 import os
 
-from activation_stats_bvp import METRICS, load_json
+from activation_stats_bvp import METRICS, load_json, with_rell2_failures
 from activation_sweep_bvp import heatmap_path, plot_heatmap
 
 ACTIVATIONS = ["Tanh", "Sigmoid", "ReLU", "Softmax"]
@@ -43,7 +43,7 @@ def render_all(results_dir: str, figures_dir: str,
     for act in activations:
         path = os.path.join(results_dir, f"activation_sweep_bvp_{act}.json")
         if os.path.exists(path):
-            sweeps[act] = load_json(path)
+            sweeps[act] = with_rell2_failures(load_json(path))
         else:
             print(f"[skip] {path} not found")
     if not sweeps:
@@ -64,6 +64,7 @@ def render_all(results_dir: str, figures_dir: str,
                 list(sw.layers), list(sw.neurons), act,
                 heatmap_path(figures_dir, metric_key, act),
                 cbar_label=meta["label"], vmin=vmin, vmax=vmax,
+                fail_mask=sw.n_failed,
             )
 
 

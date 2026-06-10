@@ -9,9 +9,17 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from typing import Sequence
+
+# Chapter-wide per-seed success cutoff on the relative L2 error (thesis
+# section 4.2.3): a run succeeds iff ||u_hat - f||_L2 / ||f||_L2 < 1e-2.
+SUCCESS_REL_L2 = 1e-2
+
+# ||f||_L2 on [-1,1] for the sweep target f(x) = (x - 1/2)^2:
+# integral of (x-1/2)^4 over [-1,1] is 61/40, so the norm is sqrt(61/40).
+TARGET_L2_NORM = math.sqrt(61.0 / 40.0)
 
 
 @dataclass(frozen=True)
@@ -127,6 +135,38 @@ def aggregate(
         cells=tuple(cells),
         created_utc=datetime.now(timezone.utc).isoformat(),
     )
+
+
+def with_rell2_failures(
+    sweep: SweepResult,
+    *,
+    success_rel_l2: float = SUCCESS_REL_L2,
+    target_l2_norm: float = TARGET_L2_NORM,
+) -> SweepResult:
+    """Return a copy of ``sweep`` with ``n_failed`` recomputed per seed.
+
+    A run succeeds iff its relative L2 error ``l2 / target_l2_norm`` is
+    below ``success_rel_l2``; a cell is flagged failed (1) when no strict
+    majority of its seeds succeeds. This is the chapter-wide criterion of
+    thesis section 4.2.3, replacing the legacy mean-log10(linf) flag.
+    """
+    def cell_flag(pts: Sequence[CellResult]) -> int:
+        n_succ = sum(
+            1 for c in pts
+            if math.isfinite(c.l2) and c.l2 / target_l2_norm < success_rel_l2
+        )
+        return int(2 * n_succ <= len(pts))
+
+    n_failed = []
+    for L in sweep.layers:
+        row = []
+        for W in sweep.neurons:
+            pts = [c for c in sweep.cells if c.layers == L and c.neurons == W]
+            if not pts:
+                raise ValueError(f"no cells for L={L}, W={W}")
+            row.append(cell_flag(pts))
+        n_failed.append(tuple(row))
+    return replace(sweep, n_failed=tuple(n_failed))
 
 
 def _tuplify(x):
@@ -256,8 +296,10 @@ def to_latex_summary(sweeps: Sequence[SweepResult]) -> str:
         r"\caption{One-dimensional interpolation benchmark: best "
         r"architecture per activation over the $L\in\{1,\ldots,7\}\times "
         r"W\in\{5,10,20,40,80\}$ grid, with $L^\infty$ and $L^2$ errors "
-        r"(mean $\pm$ std over the seed ensemble), number of cells that "
-        r"failed to train, and mean training time per cell.}",
+        r"(mean $\pm$ std over the seed ensemble), number of failed cells "
+        r"(no majority of seeds reaches "
+        r"$\varepsilon^{\mathrm{rel}}_{L^2}<10^{-2}$), and mean training "
+        r"time per cell.}",
         r"\label{tab:interp-summary}",
         r"\end{table}",
         "",

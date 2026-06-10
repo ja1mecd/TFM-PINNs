@@ -142,3 +142,32 @@ def test_fmt_pm_is_math_mode_and_handles_nonfinite():
     assert "e-0" not in s                              # no raw sci-notation
     assert _fmt_pm(float("inf"), float("inf")) == r"$\mathrm{n/a}$"
     assert _fmt_pm(float("nan"), 0.0) == r"$\mathrm{n/a}$"
+
+
+@pytest.mark.unit
+def test_with_rell2_failures_majority_rule():
+    from interpolation_stats import (
+        TARGET_L2_NORM,
+        with_rell2_failures,
+    )
+
+    def cell(seed, rel):
+        # Store the absolute L2 error that corresponds to the wanted
+        # relative error so the function's normalisation is exercised.
+        return CellResult(layers=1, neurons=5, seed=seed, linf=rel,
+                          l2=rel * TARGET_L2_NORM,
+                          train_time_s=1.0, epochs_run=50)
+
+    ok = aggregate(
+        activation="Tanh", layers=[1], neurons=[5],
+        cells=[cell(42, 1e-4), cell(43, 5e-3), cell(44, 9e-3), cell(45, 0.5)],
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+    )
+    assert with_rell2_failures(ok).n_failed[0][0] == 0
+
+    tie = aggregate(
+        activation="Tanh", layers=[1], neurons=[5],
+        cells=[cell(42, 1e-4), cell(43, 5e-3), cell(44, 0.5), cell(45, 0.9)],
+        failure_log_threshold=-0.5, machine_eps=1.1920929e-7,
+    )
+    assert with_rell2_failures(tie).n_failed[0][0] == 1

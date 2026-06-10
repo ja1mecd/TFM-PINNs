@@ -13,7 +13,7 @@ import math
 import os
 
 from error_table_pinn import plot_heatmap
-from interpolation_stats import load_json
+from interpolation_stats import load_json, with_rell2_failures
 
 ACTIVATIONS = ["Tanh", "Sigmoid", "ReLU", "Softmax"]
 RESULTS_DIR = "results"
@@ -27,7 +27,7 @@ def render_all(results_dir: str, figures_dir: str,
     for act in activations:
         path = os.path.join(results_dir, f"error_table_pinn_{act}.json")
         if os.path.exists(path):
-            sweeps[act] = load_json(path)
+            sweeps[act] = with_rell2_failures(load_json(path))
         else:
             print(f"[skip] {path} not found")
     if not sweeps:
@@ -49,7 +49,8 @@ def render_all(results_dir: str, figures_dir: str,
     for act, sw in sweeps.items():
         out = os.path.join(figures_dir, f"error_table_pinn_log_{act}.png")
         plot_heatmap(sw.linf_mean, list(sw.layers), list(sw.neurons),
-                     act, out, vmin=vmin, vmax=vmax)
+                     act, out, vmin=vmin, vmax=vmax,
+                     fail_mask=sw.n_failed)
 
 
 def main() -> None:

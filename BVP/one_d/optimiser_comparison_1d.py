@@ -292,6 +292,7 @@ def plot_comparison(
     k: float,
     adam_warmup: int,
     rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
+    figsize: tuple[float, float] = (14.0, 10.0),
 ) -> None:
     """Compose the four-panel figure using only successful seeds.
 
@@ -299,9 +300,10 @@ def plot_comparison(
     every aggregate statistic. Pipelines for which every seed failed are
     annotated as such in the legend and in the bar panels but contribute no
     line or bar height, so the comparison only reflects runs that actually
-    trained.
+    trained. ``figsize`` keeps the 2x2 grid but lets callers pick a portrait
+    geometry for full-page thesis rendering.
     """
-    fig, ax = plt.subplots(2, 2, figsize=(14, 10))
+    fig, ax = plt.subplots(2, 2, figsize=figsize)
 
     success_counts: dict[str, tuple[int, int]] = {}
 
@@ -351,7 +353,7 @@ def plot_comparison(
     ax[0, 0].set_xlabel("Epoch")
     ax[0, 0].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$ (mean, IQR shaded)")
     ax[0, 0].set_title(
-        f"Validation residual MSE (k={k:g}); successful seeds only "
+        f"Validation residual MSE (k={k:g});\nsuccessful seeds only "
         f"(rel.$L^2<{rel_l2_threshold:g}$)"
     )
     ax[0, 0].grid(True, alpha=0.3)
@@ -361,7 +363,7 @@ def plot_comparison(
     ax[0, 1].set_xlabel("Epoch")
     ax[0, 1].set_ylabel(r"$\|\widehat{u} - u^\star\|_{L^2}$ (mean, IQR shaded)")
     ax[0, 1].set_title(
-        f"Solution $L^2$ error; successful seeds only "
+        f"Solution $L^2$ error;\nsuccessful seeds only "
         f"(rel.$L^2<{rel_l2_threshold:g}$)"
     )
     ax[0, 1].grid(True, alpha=0.3)

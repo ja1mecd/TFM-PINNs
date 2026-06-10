@@ -19,7 +19,7 @@ import os
 
 import activation_sweep_bvp as sw
 import regenerate_activation_heatmaps_bvp as regen
-from activation_stats_bvp import load_json, to_latex_summary
+from activation_stats_bvp import load_json, to_latex_summary, with_rell2_failures
 
 DEFAULT_SUMMARY = os.path.join("..", "..", "..", "thesis", "tables",
                                "bvp_activation_summary.tex")
@@ -32,7 +32,7 @@ def build_summary(results_dir: str, activations: list[str],
     for act in activations:
         path = os.path.join(results_dir, f"activation_sweep_bvp_{act}.json")
         if os.path.exists(path):
-            sweeps.append(load_json(path))
+            sweeps.append(with_rell2_failures(load_json(path)))
         else:
             print(f"[summary] {path} not found, omitting {act}")
     if not sweeps:

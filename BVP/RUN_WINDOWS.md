@@ -105,3 +105,52 @@ python boxcox_sweep_1d_2darch.py
    placeholder until then, so the build won't break).
 3. `tab:helmholtz-2d-boxcox-summary` and `tab:cfgs-boxcox-summary` numbers will
    change and need updating from the new `summary_table.txt`.
+
+---
+
+# Separate task — full-grid Sigmoid for the 1D-BVP activation sweep
+
+This is **independent** of the 3×32 standardisation above. It is the activation
+*architecture* sweep (`fig:bvp-activation-heatmaps`, §4.2.2), which deliberately
+varies depth and width — it does **not** use the fixed 3×32 net.
+
+**Why:** the Sigmoid panel currently shows only a 2×2 diagnostic
+(`L∈{2,4} × W∈{40,80}`) because a diagnostic run with
+`--layers 2 4 --neurons 40 80` overwrote the full-grid
+`results/activation_sweep_bvp_Sigmoid.json`. The other three activations
+(Tanh, ReLU, Softmax) still have the full 7×5 grid; only Sigmoid must be
+re-run, on the **full default grid** so its panel matches the others.
+
+**Run as a clean full run (no `--resume`)** so all 35 cells come from this
+machine — resuming would mix the 4 Mac-computed diagnostic cells with 31 new
+ones in a single panel.
+
+```bat
+cd BVP\one_d
+
+REM 1. Full-grid Sigmoid sweep: default 7x5 grid (L=1..7, W=5,10,20,40,80),
+REM    20 seeds (42..61), k=1, 10000-epoch cap with early stopping.
+REM    No extra flags = identical protocol to the Tanh/ReLU/Softmax panels.
+REM    This overwrites the 2x2 diagnostic JSON. Heavy: ~3-8 h.
+python activation_sweep_bvp.py --activation Sigmoid
+
+REM 2. Re-render all four panels on the shared log10 colour scale
+REM    (re-reads every activation JSON; needed because the shared vmax shifts
+REM    once Sigmoid's full range is back in).
+python regenerate_activation_heatmaps_bvp.py
+
+REM 3. Rebuild the cross-activation summary table (tab:bvp-activation-summary).
+python -c "import run_activation_study_bvp as o; o.build_summary('results', ['Tanh','Sigmoid','ReLU','Softmax'], o.DEFAULT_SUMMARY)"
+```
+
+**Sanity check before trusting it:** the new
+`results/activation_sweep_bvp_Sigmoid.json` should report
+`"layers": [1,2,3,4,5,6,7]` and `"neurons": [5,10,20,40,80]` (35 cells), not the
+2×2 diagnostic.
+
+**Bring back:** the updated `results/activation_sweep_bvp_Sigmoid.json` and the
+re-rendered `figures/activation_sweep_bvp_sol_linf_*.png` (all four — the shared
+scale changes Tanh/ReLU/Softmax too) plus `thesis/tables/bvp_activation_summary.tex`.
+The thesis figure paths already point at these filenames, so no `.tex` repointing
+is needed; only the bimodal-Sigmoid prose in §4.2.2 may want a glance once the
+full grid is back.
