@@ -1,29 +1,34 @@
-"""
-2D Poisson PINN on the unit square — closes the gap of section 4.3.1 of the
-thesis, which currently defers the numerical results.
+"""Vacuum Grad-Shafranov PINN validation run — closes the gap of section 4.3.2
+of the thesis, which currently defers the psi = R^2 numerical results.
 
-Equation:
+Operator (vacuum / current-free Grad-Shafranov, Delta-star):
 
-    u_xx + u_yy = -2 pi^2 sin(pi x) sin(pi y)    on (0, 1) x (0, 1),
-    u = 0 on the boundary,
+    Delta*_psi = psi_RR - (1/R) psi_R + psi_ZZ = 0,   on [R_LO, R_HI] x [Z_LO, Z_HI],
 
-with exact solution
+with the exact test solution
 
-    u_exact(x, y) = sin(pi x) sin(pi y).
+    psi_exact(R, Z) = R^2,
 
-The hard Dirichlet ansatz from the thesis is used directly:
+which satisfies Delta*_psi = 0 exactly (psi_RR = 2, (1/R) psi_R = (1/R)(2R) = 2,
+psi_ZZ = 0). The box keeps R bounded away from 0 so the 1/R coefficient stays
+regular while still exercising the variable-coefficient term that distinguishes
+this operator from the Laplacian.
 
-    u_hat(x, y; theta) = x (1 - x) y (1 - y) N(x, y; theta).
+Hard Dirichlet ansatz, in the spirit of the rest of chapter 4:
 
-The training pipeline matches the rest of chapter 4: Adam warm-up followed by
-either BFGS or self-scaled Broyden refinement, identity loss by default, and
-multi-seed averaging for statistical stability. The script saves a four-panel
-figure (exact, learnt, pointwise error, loss + L^2 curves) plus a summary
-table.
+    psi_hat(R, Z; theta) = R^2 + b(R, Z) N(R, Z; theta),
+    b(R, Z) = (R - R_LO)(R - R_HI)(Z - Z_LO)(Z - Z_HI),
 
-Run options expose the optimiser variant, the loss transform (so the same
-script is reusable for an eventual Box-Cox sweep on the 2D Poisson), and
-the seed list.
+so the surrogate matches psi = R^2 on the whole boundary regardless of the
+weights, and the network correction b N is forced to zero by the residual. The
+run is a genuine optimisation (the random initial N gives a nonzero residual the
+optimiser must suppress) that doubles as an implementation check of the Delta*
+operator and its automatic differentiation.
+
+The training pipeline matches the 2D Poisson solver: Adam warm-up followed by
+self-scaled Broyden refinement, identity loss by default, multi-seed averaging,
+and a four-panel figure (exact, learnt, pointwise error, solution + residual L2
+curves) plus a summary table.
 """
 
 from __future__ import annotations
@@ -65,21 +70,15 @@ if device.type == "cuda":
 
 
 # =============================================================================
-# Problem
+# Problem (R bounded away from 0 to keep 1/R regular)
 # =============================================================================
-X_LO, X_HI = 0.0, 1.0
-Y_LO, Y_HI = 0.0, 1.0
+R_LO, R_HI = 1.0, 2.0
+Z_LO, Z_HI = -1.0, 1.0
+AREA = (R_HI - R_LO) * (Z_HI - Z_LO)
 
 
-def f_rhs(xy: torch.Tensor) -> torch.Tensor:
-    """Forcing -2 pi^2 sin(pi x) sin(pi y); satisfies u_xx + u_yy = f."""
-    x = xy[:, 0:1]
-    y = xy[:, 1:2]
-    return -2.0 * (np.pi ** 2) * torch.sin(np.pi * x) * torch.sin(np.pi * y)
-
-
-def u_exact_np(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    return np.sin(np.pi * x) * np.sin(np.pi * y)
+def psi_exact_np(R: np.ndarray, Z: np.ndarray) -> np.ndarray:
+    return R ** 2 + 0.0 * Z
 
 
 # =============================================================================
@@ -97,18 +96,19 @@ class Net(nn.Module):
         layers.append(nn.Linear(in_dim, 1))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, xy: torch.Tensor) -> torch.Tensor:
-        return self.net(xy)
+    def forward(self, rz: torch.Tensor) -> torch.Tensor:
+        return self.net(rz)
 
 
-def hard_ansatz(xy: torch.Tensor, raw: torch.Tensor) -> torch.Tensor:
-    """u_hat(x, y) = x (1-x) y (1-y) N(x, y)."""
-    x = xy[:, 0:1]
-    y = xy[:, 1:2]
-    return x * (1.0 - x) * y * (1.0 - y) * raw
+def hard_ansatz(rz: torch.Tensor, raw: torch.Tensor) -> torch.Tensor:
+    """psi_hat(R, Z) = R^2 + (R-R_LO)(R-R_HI)(Z-Z_LO)(Z-Z_HI) N(R, Z)."""
+    R = rz[:, 0:1]
+    Z = rz[:, 1:2]
+    bubble = (R - R_LO) * (R - R_HI) * (Z - Z_LO) * (Z - Z_HI)
+    return R ** 2 + bubble * raw
 
 
-class PoissonPINN:
+class VacuumGSPINN:
     def __init__(
         self,
         model: nn.Module,
@@ -142,45 +142,39 @@ class PoissonPINN:
         self.sol_l2: list[float] = []
         self.sol_rel_l2: list[float] = []
 
-        # Best-state tracking for early stopping. The optimiser is allowed to
-        # drift around the basin once J is at noise floor; we restore the best
-        # parameters at the end of train() so the reported run is the best one
-        # the optimiser ever saw, not the last one.
         self.best_state: dict | None = None
         self.best_val_ma = float("inf")
         self.early_stop_epoch: int | None = None
 
-    def _u_hat(self, xy: torch.Tensor) -> torch.Tensor:
-        return hard_ansatz(xy, self.model(xy))
+    def _psi_hat(self, rz: torch.Tensor) -> torch.Tensor:
+        return hard_ansatz(rz, self.model(rz))
 
-    def _residual(self, xy: torch.Tensor, create_graph_second: bool) -> torch.Tensor:
-        xy = xy.to(device)
-        if not xy.requires_grad:
-            xy = xy.requires_grad_(True)
-        u = self._u_hat(xy)
+    def _residual(self, rz: torch.Tensor, create_graph_second: bool) -> torch.Tensor:
+        rz = rz.to(device)
+        if not rz.requires_grad:
+            rz = rz.requires_grad_(True)
+        psi = self._psi_hat(rz)
         grad = torch.autograd.grad(
-            u, xy, grad_outputs=torch.ones_like(u), create_graph=True
+            psi, rz, grad_outputs=torch.ones_like(psi), create_graph=True
         )[0]
-        u_x = grad[:, 0:1]
-        u_y = grad[:, 1:2]
-        # The first second-derivative call must keep the first-order graph
-        # alive so the second one (u_yy) can still backprop through it.
-        # Without retain_graph=True this fails as soon as create_graph_second
-        # is False (i.e. on every validation/eval pass).
-        u_xx = torch.autograd.grad(
-            u_x,
-            xy,
-            grad_outputs=torch.ones_like(u_x),
+        psi_R = grad[:, 0:1]
+        psi_Z = grad[:, 1:2]
+        psi_RR = torch.autograd.grad(
+            psi_R,
+            rz,
+            grad_outputs=torch.ones_like(psi_R),
             create_graph=create_graph_second,
             retain_graph=True,
         )[0][:, 0:1]
-        u_yy = torch.autograd.grad(
-            u_y,
-            xy,
-            grad_outputs=torch.ones_like(u_y),
+        psi_ZZ = torch.autograd.grad(
+            psi_Z,
+            rz,
+            grad_outputs=torch.ones_like(psi_Z),
             create_graph=create_graph_second,
         )[0][:, 1:2]
-        return (u_xx + u_yy) - f_rhs(xy)
+        R = rz[:, 0:1]
+        # Vacuum Grad-Shafranov: Delta*_psi = psi_RR - (1/R) psi_R + psi_ZZ = 0.
+        return psi_RR - (1.0 / R) * psi_R + psi_ZZ
 
     def _transform(self, J: torch.Tensor) -> torch.Tensor:
         eps = self.loss_eps
@@ -197,31 +191,30 @@ class PoissonPINN:
             return torch.expm1(lam * torch.log(J + eps)) / lam
         raise ValueError(f"unknown transform {self.loss_transform!r}")
 
-    def compute_loss(self, xy: torch.Tensor, create_graph_second: bool):
-        xy = xy.detach().clone().requires_grad_(True)
-        r = self._residual(xy, create_graph_second=create_graph_second)
+    def compute_loss(self, rz: torch.Tensor, create_graph_second: bool):
+        rz = rz.detach().clone().requires_grad_(True)
+        r = self._residual(rz, create_graph_second=create_graph_second)
         J_raw = torch.mean(r ** 2)
         return self._transform(J_raw), J_raw.detach()
 
     # ---- diagnostics ----
     def _eval_grid(self, n: int) -> tuple[np.ndarray, np.ndarray, torch.Tensor]:
-        xs = np.linspace(X_LO, X_HI, n).astype(np.float32)
-        ys = np.linspace(Y_LO, Y_HI, n).astype(np.float32)
-        XX, YY = np.meshgrid(xs, ys, indexing="ij")
-        flat = np.stack([XX.ravel(), YY.ravel()], axis=1)
-        return XX, YY, torch.from_numpy(flat).to(device)
+        rs = np.linspace(R_LO, R_HI, n).astype(np.float32)
+        zs = np.linspace(Z_LO, Z_HI, n).astype(np.float32)
+        RR, ZZ = np.meshgrid(rs, zs, indexing="ij")
+        flat = np.stack([RR.ravel(), ZZ.ravel()], axis=1)
+        return RR, ZZ, torch.from_numpy(flat).to(device)
 
     def compute_sol_l2(self, n: int = 200) -> tuple[float, float]:
-        XX, YY, t = self._eval_grid(n)
+        RR, ZZ, t = self._eval_grid(n)
         with torch.no_grad():
-            u_pred = self._u_hat(t).cpu().numpy().reshape(n, n)
-        u_true = u_exact_np(XX, YY)
-        diff = u_pred - u_true
-        # Trapezoid on the unit square.
-        dx = (X_HI - X_LO) / (n - 1)
-        dy = (Y_HI - Y_LO) / (n - 1)
-        l2_abs = float(np.sqrt(np.sum(diff ** 2) * dx * dy))
-        denom = float(np.sqrt(np.sum(u_true ** 2) * dx * dy))
+            psi_pred = self._psi_hat(t).cpu().numpy().reshape(n, n)
+        psi_true = psi_exact_np(RR, ZZ)
+        diff = psi_pred - psi_true
+        dr = (R_HI - R_LO) / (n - 1)
+        dz = (Z_HI - Z_LO) / (n - 1)
+        l2_abs = float(np.sqrt(np.sum(diff ** 2) * dr * dz))
+        denom = float(np.sqrt(np.sum(psi_true ** 2) * dr * dz))
         l2_rel = l2_abs / (denom + 1e-12)
         return l2_abs, l2_rel
 
@@ -235,24 +228,12 @@ class PoissonPINN:
         resample_every: int = 500,
         verbose_freq: int = 500,
         diag_grid_n: int = 200,
-        # ---- adaptive handover (Adam -> QN) ----
-        # `handover_strategy='plateau'` switches to the quasi-Newton phase the
-        # first time the Adam-phase validation J fails to improve by
-        # `plateau_min_delta` over `plateau_patience` consecutive epochs (or
-        # epoch >= `handover_max_adam_epochs`, whichever comes first). With
-        # `handover_strategy='fixed'` we fall back to the legacy schedule
-        # (switch at exactly `adam_epochs`). The other two strategies match
-        # `pinn_adaptive_handover.py` for parity with the 1D solver.
         handover_strategy: str = "fixed",
         handover_max_adam_epochs: int = 10000,
         plateau_patience: int = 200,
         plateau_min_delta: float = 1e-4,
         loss_threshold: float = 1.0,
         gradnorm_threshold: float = 1e-3,
-        # ---- QN-phase early stopping (urban-style relative-MA criterion) ----
-        # Mirrors pinn_ssbroyden_2d_urban.py. Active only AFTER handover, so an
-        # Adam plateau cannot terminate the run before the QN method engages.
-        # `min_delta`/`moving_avg_window` still drive the best-weights tracker.
         patience: int = 500,
         min_delta: float = 1e-12,
         moving_avg_window: int = 20,
@@ -273,25 +254,22 @@ class PoissonPINN:
 
         def resample():
             x = torch.rand(n_collocation, 2, device=device)
-            x[:, 0] = X_LO + (X_HI - X_LO) * x[:, 0]
-            x[:, 1] = Y_LO + (Y_HI - Y_LO) * x[:, 1]
+            x[:, 0] = R_LO + (R_HI - R_LO) * x[:, 0]
+            x[:, 1] = Z_LO + (Z_HI - Z_LO) * x[:, 1]
             perm = torch.randperm(n_collocation, device=device)
             x = x[perm]
             return x[:n_train].detach().clone(), x[n_train:].detach().clone()
 
         x_train, x_val = resample()
 
-        # Adam-phase plateau detector (drives the handover, NOT early stop).
         plateau_best = float("inf")
         plateau_no_improve = 0
         handover_done = False
         self.handover_epoch: int | None = None
 
-        # QN-phase best-weights tracker (only active once handover_done).
         ma_buf: list[float] = []
         epochs_no_improve = 0
 
-        # QN-phase early-stop detector (urban-style relative-MA on raw val J).
         es_hist: "deque[float]" = deque(maxlen=es_window)
         es_best_ma = float("inf")
         es_bad = 0
@@ -342,11 +320,6 @@ class PoissonPINN:
             self.J_train.append(float(J_raw.item()))
             self.J_val.append(float(val_raw.item()))
 
-            # ---------------------------------------------------------------
-            # Adam phase: only the handover detector runs; we ignore the
-            # MA-based early-stop counter here, otherwise an Adam plateau
-            # could terminate the run before SSBroyden ever engages.
-            # ---------------------------------------------------------------
             if use_adam:
                 v = float(val_raw.item())
                 if v + plateau_min_delta < plateau_best:
@@ -372,10 +345,6 @@ class PoissonPINN:
                 if handover_now:
                     handover_done = True
                     self.handover_epoch = epoch
-                    # Reset the early-stop tracker so QN-phase improvement
-                    # over the (much higher) Adam-phase floor counts as new
-                    # progress; otherwise the first QN step would already
-                    # blow past best_val_ma and the counter would never tick.
                     self.best_val_ma = float("inf")
                     self.best_state = None
                     ma_buf = []
@@ -389,9 +358,6 @@ class PoissonPINN:
                         f"plateau_no_improve={plateau_no_improve}, "
                         f"J_val={v:.3e})"
                     )
-            # ---------------------------------------------------------------
-            # QN phase: track val-MA and early-stop on patience.
-            # ---------------------------------------------------------------
             else:
                 ma_buf.append(float(val_raw.item()))
                 if len(ma_buf) > moving_avg_window:
@@ -408,7 +374,6 @@ class PoissonPINN:
                 else:
                     epochs_no_improve += 1
 
-                # Urban-style relative-MA early-stop counter (raw val J).
                 if early_stop:
                     jv = float(val_raw.item())
                     es_hist.append(jv)
@@ -430,9 +395,6 @@ class PoissonPINN:
                                 )
                                 es_stopped_at = epoch
 
-            # Diagnostics every epoch (printing throttled by verbose_freq). The
-            # old every-verbose_freq sampling produced a coarse solution-error
-            # staircase in the convergence plots.
             l2_abs, l2_rel = self.compute_sol_l2(n=diag_grid_n)
             self.sol_l2.append(l2_abs)
             self.sol_rel_l2.append(l2_rel)
@@ -443,7 +405,6 @@ class PoissonPINN:
                     f"J_val={self.J_val[-1]:.3e} | solL2={l2_abs:.3e} | relL2={l2_rel:.3e}"
                 )
 
-            # QN-phase early stopping (urban-style; fires only after handover).
             if es_stopped_at is not None:
                 self.early_stop_epoch = epoch
                 n_qn = epoch - (self.handover_epoch or adam_epochs)
@@ -453,9 +414,6 @@ class PoissonPINN:
                 )
                 break
 
-        # Restore best parameters from the QN phase. If handover never
-        # happened (n_epochs too small) we leave the network at its final
-        # Adam state — there's nothing better to roll back to.
         if self.best_state is not None:
             self.model.load_state_dict(self.best_state)
 
@@ -471,7 +429,7 @@ class SeedResult:
     final_J_val: float
     final_sol_l2: float
     final_sol_rel_l2: float
-    field_pred: np.ndarray  # last seed's field for the figure
+    field_pred: np.ndarray
 
 
 def run_seeds(
@@ -499,7 +457,7 @@ def run_seeds(
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
         model = Net(hidden=hidden)
-        pinn = PoissonPINN(
+        pinn = VacuumGSPINN(
             model=model,
             lr=lr,
             loss_transform=loss_transform,
@@ -507,7 +465,7 @@ def run_seeds(
             qn_variant=qn_variant,
         )
         print(
-            f"\n[seed={seed}] training 2D Poisson PINN  "
+            f"\n[seed={seed}] training vacuum Grad-Shafranov PINN  "
             f"(handover={handover_strategy}, plateau_patience={plateau_patience}, "
             f"qn_patience={patience})"
         )
@@ -525,9 +483,9 @@ def run_seeds(
             min_delta=min_delta,
             moving_avg_window=moving_avg_window,
         )
-        XX, YY, t = pinn._eval_grid(150)
+        RR, ZZ, t = pinn._eval_grid(150)
         with torch.no_grad():
-            u_pred = pinn._u_hat(t).cpu().numpy().reshape(150, 150)
+            psi_pred = pinn._psi_hat(t).cpu().numpy().reshape(150, 150)
         out.append(
             SeedResult(
                 seed=seed,
@@ -536,16 +494,13 @@ def run_seeds(
                 final_J_val=float(pinn.J_val[-1]),
                 final_sol_l2=float(pinn.sol_l2[-1]) if pinn.sol_l2 else float("nan"),
                 final_sol_rel_l2=float(pinn.sol_rel_l2[-1]) if pinn.sol_rel_l2 else float("nan"),
-                field_pred=u_pred,
+                field_pred=psi_pred,
             )
         )
     return tuple(out)
 
 
 def _pad_and_stack(seq: list[np.ndarray]) -> np.ndarray:
-    """Stack possibly variable-length histories into (n, max_len), padding
-    each shorter run with its last value. Handles the variable-length
-    seeds that early stopping produces."""
     if not seq:
         return np.empty((0, 0), dtype=np.float64)
     max_len = max(len(a) for a in seq)
@@ -565,35 +520,40 @@ def plot_results(
 ) -> None:
     fig, ax = plt.subplots(2, 2, figsize=(13, 10))
 
-    xs = np.linspace(X_LO, X_HI, n)
-    ys = np.linspace(Y_LO, Y_HI, n)
-    XX, YY = np.meshgrid(xs, ys, indexing="ij")
-    u_true = u_exact_np(XX, YY)
-    u_pred = results[-1].field_pred  # last seed
-    err = np.abs(u_pred - u_true)
+    rs = np.linspace(R_LO, R_HI, n)
+    zs = np.linspace(Z_LO, Z_HI, n)
+    RR, ZZ = np.meshgrid(rs, zs, indexing="ij")
+    psi_true = psi_exact_np(RR, ZZ)
+    psi_pred = results[-1].field_pred
+    err = np.abs(psi_pred - psi_true)
 
-    im0 = ax[0, 0].imshow(u_true.T, origin="lower", extent=(X_LO, X_HI, Y_LO, Y_HI),
-                          cmap="viridis", aspect="equal")
-    ax[0, 0].set_title(r"$u_{\mathrm{exact}}(x, y)$")
+    extent = (R_LO, R_HI, Z_LO, Z_HI)
+    im0 = ax[0, 0].imshow(psi_true.T, origin="lower", extent=extent,
+                          cmap="viridis", aspect="auto")
+    ax[0, 0].set_title(r"$\psi_{\mathrm{exact}}(R, Z) = R^2$")
     fig.colorbar(im0, ax=ax[0, 0], shrink=0.8)
 
-    im1 = ax[0, 1].imshow(u_pred.T, origin="lower", extent=(X_LO, X_HI, Y_LO, Y_HI),
-                          cmap="viridis", aspect="equal")
-    ax[0, 1].set_title(r"$\widehat{u}_\theta(x, y)$ (last seed)")
+    im1 = ax[0, 1].imshow(psi_pred.T, origin="lower", extent=extent,
+                          cmap="viridis", aspect="auto")
+    ax[0, 1].set_title(r"$\widehat{\psi}_\theta(R, Z)$ (last seed)")
     fig.colorbar(im1, ax=ax[0, 1], shrink=0.8)
 
-    im2 = ax[1, 0].imshow(err.T, origin="lower", extent=(X_LO, X_HI, Y_LO, Y_HI),
-                          cmap="inferno", aspect="equal", norm=matplotlib.colors.LogNorm(vmin=max(1e-12, err.min() + 1e-12), vmax=err.max() + 1e-12))
-    ax[1, 0].set_title(r"$|\widehat{u}_\theta - u_{\mathrm{exact}}|$ (log scale)")
+    im2 = ax[1, 0].imshow(
+        err.T, origin="lower", extent=extent, cmap="inferno", aspect="auto",
+        norm=matplotlib.colors.LogNorm(
+            vmin=max(1e-14, err.min() + 1e-14), vmax=err.max() + 1e-14
+        ),
+    )
+    ax[1, 0].set_title(r"$|\widehat{\psi}_\theta - \psi_{\mathrm{exact}}|$ (log scale)")
+    ax[1, 0].set_xlabel("R")
+    ax[1, 0].set_ylabel("Z")
     fig.colorbar(im2, ax=ax[1, 0], shrink=0.8)
 
-    # Convergence panel: solution L2 error and residual L2 error over epochs.
-    # The residual L2 norm is sqrt(J_val): J_val is the mean squared residual
-    # on the unit square, whose area is 1, so sqrt(mean(r^2)) is ||Delta u - f||
-    # in L2. Plotting both makes explicit that the residual sits well above the
-    # solution error, the "residual is the stricter notion" point of the chapter.
+    # Convergence: solution L2 error and residual L2 error over epochs. The
+    # residual L2 norm is sqrt(AREA * J_val); J_val is the mean squared residual
+    # over the box, so sqrt(area * mean(r^2)) estimates ||Delta*_psi||_{L2}.
     sol_seeds = [np.asarray(r.sol_l2, dtype=np.float64) for r in results]
-    res_seeds = [np.sqrt(np.asarray(r.J_val, dtype=np.float64)) for r in results]
+    res_seeds = [np.sqrt(AREA * np.asarray(r.J_val, dtype=np.float64)) for r in results]
     for sol, res in zip(sol_seeds, res_seeds):
         ax[1, 1].semilogy(sol, color="C0", alpha=0.25)
         ax[1, 1].semilogy(res, color="C1", alpha=0.25)
@@ -601,11 +561,11 @@ def plot_results(
     res_H = _pad_and_stack(res_seeds)
     ax[1, 1].semilogy(
         np.nanmean(sol_H, axis=0), color="C0", linewidth=1.8,
-        label=r"solution $\|\widehat{u}_\theta - u_{\mathrm{exact}}\|_{L^2}$",
+        label=r"solution $\|\widehat{\psi}_\theta - \psi_{\mathrm{exact}}\|_{L^2}$",
     )
     ax[1, 1].semilogy(
         np.nanmean(res_H, axis=0), color="C1", linewidth=1.8,
-        label=r"residual $\|\Delta\widehat{u}_\theta - f\|_{L^2}$",
+        label=r"residual $\|\Delta^\ast\widehat{\psi}_\theta\|_{L^2}$",
     )
     ax[1, 1].set_xlabel("Epoch")
     ax[1, 1].set_ylabel(r"$L^2$ error")
@@ -637,7 +597,7 @@ def write_summary(
         "final_rel_l2_std":  float(np.std([r.final_sol_rel_l2 for r in results])),
     }
     payload = {
-        "problem": "2D Poisson on (0,1)^2, hard Dirichlet ansatz",
+        "problem": f"Vacuum Grad-Shafranov psi=R^2 on [{R_LO},{R_HI}]x[{Z_LO},{Z_HI}]",
         "qn_variant": qn_variant,
         "n_epochs": n_epochs,
         "adam_epochs": adam_epochs,
@@ -653,19 +613,11 @@ def write_summary(
 # CLI
 # =============================================================================
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="2D Poisson PINN on the unit square (multi-seed).")
-    p.add_argument(
-        "--qn-variant",
-        type=str,
-        default="ssbroyden",
-        choices=["bfgs", "ssbfgs", "ssbroyden"],
-    )
-    p.add_argument(
-        "--loss-transform",
-        type=str,
-        default="identity",
-        choices=["identity", "sqrt", "log", "boxcox"],
-    )
+    p = argparse.ArgumentParser(description="Vacuum Grad-Shafranov PINN validation (multi-seed).")
+    p.add_argument("--qn-variant", type=str, default="ssbroyden",
+                   choices=["bfgs", "ssbfgs", "ssbroyden"])
+    p.add_argument("--loss-transform", type=str, default="identity",
+                   choices=["identity", "sqrt", "log", "boxcox"])
     p.add_argument("--loss-lambda", type=float, default=1.0)
     p.add_argument("--epochs", type=int, default=10000,
                    help="Total budget cap (2000 Adam + up to 8000 QN); QN-phase "
@@ -676,44 +628,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--hidden", type=int, nargs="+", default=[32, 32, 32])
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
-    p.add_argument(
-        "--handover-strategy",
-        type=str,
-        default="fixed",
-        choices=["fixed", "plateau", "loss_threshold", "gradnorm"],
-        help="When to hand over from Adam to the quasi-Newton optimiser. "
-             "Default 'fixed': switch at exactly --adam-epochs (the "
-             "standardised 2000-epoch convention) so the dashed handover "
-             "line is meaningful and all seeds share an identical Adam phase.",
-    )
-    p.add_argument(
-        "--handover-max-adam-epochs",
-        type=int,
-        default=10000,
-        help="Hard cap on Adam-phase length, regardless of strategy.",
-    )
+    p.add_argument("--handover-strategy", type=str, default="fixed",
+                   choices=["fixed", "plateau", "loss_threshold", "gradnorm"])
+    p.add_argument("--handover-max-adam-epochs", type=int, default=10000)
     p.add_argument("--plateau-patience", type=int, default=200)
     p.add_argument("--plateau-min-delta", type=float, default=1e-4)
-    p.add_argument(
-        "--patience",
-        type=int,
-        default=500,
-        help="QN-phase early-stop patience. Only counted AFTER handover, "
-             "so an Adam plateau cannot terminate the run before SSBroyden "
-             "has had a chance to engage. Set >= --epochs to disable.",
-    )
-    p.add_argument(
-        "--min-delta",
-        type=float,
-        default=1e-12,
-        help="Absolute MA improvement threshold for early stopping.",
-    )
-    p.add_argument(
-        "--moving-avg-window",
-        type=int,
-        default=20,
-        help="Window length of the val-J moving average used by patience.",
-    )
+    p.add_argument("--patience", type=int, default=500)
+    p.add_argument("--min-delta", type=float, default=1e-12)
+    p.add_argument("--moving-avg-window", type=int, default=20)
     p.add_argument("--results-dir", type=str, default=os.path.join("..", "results"))
     return p.parse_args(argv)
 
@@ -724,7 +646,7 @@ def main(argv: list[str] | None = None) -> None:
     run_tag = time.strftime("%Y%m%d_%H%M%S")
     out_dir = os.path.join(
         args.results_dir,
-        f"poisson2d_unitsquare_{args.qn_variant}_{args.loss_transform}_{run_tag}",
+        f"vacuum_gs_{args.qn_variant}_{args.loss_transform}_{run_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -747,7 +669,7 @@ def main(argv: list[str] | None = None) -> None:
         moving_avg_window=args.moving_avg_window,
     )
 
-    plot_results(results, out_path=os.path.join(out_dir, "poisson2d_results.png"))
+    plot_results(results, out_path=os.path.join(out_dir, "vacuum_gs_results.png"))
     write_summary(
         results=results,
         out_path=os.path.join(out_dir, "summary.json"),

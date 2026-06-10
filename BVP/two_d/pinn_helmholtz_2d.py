@@ -938,16 +938,29 @@ class PINN_Helmholtz_Solver:
         fig.colorbar(im1, ax=axes[0, 1])
         axes[0, 1].set_title(r"$\phi_{\mathrm{PINN}}(x, y)$")
 
-        if self.obj_train:
-            epochs_arr = np.arange(1, len(self.obj_train) + 1)
-            axes[1, 0].semilogy(epochs_arr, self.obj_train, label="obj(train)")
-            axes[1, 0].semilogy(epochs_arr, self.obj_val, label="obj(val)")
-            axes[1, 0].semilogy(epochs_arr, self.J_train, "--", label="J(train)")
-            axes[1, 0].semilogy(epochs_arr, self.J_val, "--", label="J(val)")
+        if self.sol_l2:
+            # Convergence panel: solution L2 error and residual (PDE) L2 error
+            # over epochs, alongside the validation residual J. Both L2 norms
+            # are true grid trapezoid norms (compute_sol_l2 / compute_pde_l2).
+            axes[1, 0].semilogy(
+                np.arange(1, len(self.J_val) + 1), self.J_val,
+                color="0.6", linewidth=1.0, label=r"$\mathcal{J}_{\mathrm{val}}$",
+            )
+            axes[1, 0].semilogy(
+                np.arange(1, len(self.sol_l2) + 1), self.sol_l2,
+                color="C0", linewidth=1.8,
+                label=r"solution $\|\phi_{\mathrm{PINN}} - \phi_{\mathrm{exact}}\|_{L^2}$",
+            )
+            axes[1, 0].semilogy(
+                np.arange(1, len(self.pde_l2) + 1), self.pde_l2,
+                color="C1", linewidth=1.8,
+                label=r"residual $\|\Delta\phi + k^2\phi - f\|_{L^2}$",
+            )
             axes[1, 0].set_xlabel("Epoch")
-            axes[1, 0].set_title("Loss curves")
+            axes[1, 0].set_ylabel(r"$L^2$ error / $\mathcal{J}$")
+            axes[1, 0].set_title(r"Solution and residual $L^2$ error")
             axes[1, 0].grid(True, alpha=0.3)
-            axes[1, 0].legend()
+            axes[1, 0].legend(fontsize=8)
 
         im3 = axes[1, 1].contourf(XX, YY, abs_err, levels=30, cmap="magma")
         fig.colorbar(im3, ax=axes[1, 1])
