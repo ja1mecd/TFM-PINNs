@@ -94,9 +94,10 @@ def main() -> None:
     p.add_argument("--adam-warmup", type=int, default=2000)
     p.add_argument("--k", type=float, default=4.0)
     p.add_argument("--portrait", action="store_true",
-                   help="Render the 2x2 grid in portrait geometry (9.5x13in) "
-                        "for full-page thesis figures; appends '_portrait' to "
-                        "the figure filename.")
+                   help="Render the 2x2 grid in a near-square geometry "
+                        "(11x10in) so the subplots keep natural proportions "
+                        "when the figure is placed upright on a portrait page; "
+                        "appends '_portrait' to the figure filename.")
     args = p.parse_args()
 
     results = reconstruct(args.results_dir)
@@ -106,7 +107,7 @@ def main() -> None:
     fig_path = os.path.join(args.results_dir, f"optimiser_comparison_{tag}.png")
     sum_path = os.path.join(args.results_dir, f"summary_table_{tag}.txt")
 
-    figsize = (9.5, 13.0) if args.portrait else (14.0, 10.0)
+    figsize = (11.0, 10.0) if args.portrait else (14.0, 10.0)
     plot_comparison(results, fig_path, k=args.k, adam_warmup=args.adam_warmup,
                     rel_l2_threshold=args.threshold, figsize=figsize)
     write_summary(results, sum_path, k=args.k, total_epochs=-1,

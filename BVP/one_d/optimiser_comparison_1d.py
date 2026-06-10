@@ -3,7 +3,9 @@ Optimiser comparison on the 1D BVP -u'' = (k pi)^2 sin(k pi x).
 
 Trains four optimisation pipelines on the *same* network architecture, the
 *same* collocation seeds, and the *same* total iteration budget, and reports
-mean +/- std of the final L^2 residual and L^2 solution error across seeds:
+median (and best-run minimum) of the final L^2 residual and L^2 solution
+error across seeds -- medians, not means, because a single shallow success
+otherwise dominates the aggregate:
 
     - "adam"             pure Adam for the full budget;
     - "adam_bfgs"        Adam warm start, then standard BFGS;
@@ -83,6 +85,24 @@ def is_successful(run: "SeedRun", rel_l2_threshold: float) -> bool:
     """True iff the final iterate beats the configured rel. L^2 threshold."""
     return bool(np.isfinite(run.final_sol_rel_l2)) and (
         run.final_sol_rel_l2 < rel_l2_threshold
+    )
+
+
+def median_iqr(values: "list[float] | tuple[float, ...]") -> tuple[float, float, float]:
+    """Return ``(median, q1, q3)`` of a non-empty collection.
+
+    The median is the headline statistic everywhere in this module: the
+    final-error distributions are heavy-tailed even within the successful
+    subset (a single shallow success can sit two decades above the rest),
+    and a mean would be dominated by that one run.
+    """
+    if len(values) == 0:
+        raise ValueError("median_iqr needs at least one value")
+    arr = np.asarray(values, dtype=np.float64)
+    return (
+        float(np.median(arr)),
+        float(np.quantile(arr, 0.25)),
+        float(np.quantile(arr, 0.75)),
     )
 
 
@@ -273,9 +293,9 @@ def _stack_ffill(histories: list[np.ndarray]) -> np.ndarray:
     raw histories are ragged. Each short history is forward-filled with its
     final (converged) value out to the longest length, which is the honest
     representation for a convergence curve: an early-stopped run simply stays
-    at the value it converged to. NOTE: the mean/IQR aggregation downstream is
-    still the naive linear-mean-on-log scheme and is slated for a robust
-    redesign once the re-run data is in.
+    at the value it converged to. Downstream aggregation is the epochwise
+    median with an IQR band, so a single straggler seed cannot drag the
+    plotted curve (the old linear-mean-on-log scheme did exactly that).
     """
     max_len = max(h.size for h in histories)
     out = np.empty((len(histories), max_len), dtype=np.float64)
@@ -328,22 +348,22 @@ def plot_comparison(
             continue
 
         H = _stack_ffill([s.J_val_history for s in succ])
-        mean = np.mean(H, axis=0)
+        med = np.median(H, axis=0)
         lo = np.quantile(H, 0.25, axis=0)
         hi = np.quantile(H, 0.75, axis=0)
-        epochs = np.arange(1, mean.size + 1)
+        epochs = np.arange(1, med.size + 1)
         ax[0, 0].semilogy(
-            epochs, mean, color=c, linewidth=1.5,
+            epochs, med, color=c, linewidth=1.5,
             label=PIPELINE_LABEL[r.pipeline] + succ_tag,
         )
         ax[0, 0].fill_between(epochs, lo, hi, color=c, alpha=0.15)
 
         S = _stack_ffill([s.sol_l2_history for s in succ])
-        smean = np.mean(S, axis=0)
+        smed = np.median(S, axis=0)
         slo = np.quantile(S, 0.25, axis=0)
         shi = np.quantile(S, 0.75, axis=0)
         ax[0, 1].semilogy(
-            epochs, smean, color=c, linewidth=1.5,
+            epochs, smed, color=c, linewidth=1.5,
             label=PIPELINE_LABEL[r.pipeline] + succ_tag,
         )
         ax[0, 1].fill_between(epochs, slo, shi, color=c, alpha=0.15)
@@ -351,7 +371,7 @@ def plot_comparison(
     ax[0, 0].axvline(adam_warmup, color="k", linestyle=":", alpha=0.5,
                      label=f"Adam$\\to$QN handover (epoch {adam_warmup})")
     ax[0, 0].set_xlabel("Epoch")
-    ax[0, 0].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$ (mean, IQR shaded)")
+    ax[0, 0].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$ (median, IQR shaded)")
     ax[0, 0].set_title(
         f"Validation residual MSE (k={k:g});\nsuccessful seeds only "
         f"(rel.$L^2<{rel_l2_threshold:g}$)"
@@ -361,7 +381,7 @@ def plot_comparison(
 
     ax[0, 1].axvline(adam_warmup, color="k", linestyle=":", alpha=0.5)
     ax[0, 1].set_xlabel("Epoch")
-    ax[0, 1].set_ylabel(r"$\|\widehat{u} - u^\star\|_{L^2}$ (mean, IQR shaded)")
+    ax[0, 1].set_ylabel(r"$\|\widehat{u} - u^\star\|_{L^2}$ (median, IQR shaded)")
     ax[0, 1].set_title(
         f"Solution $L^2$ error;\nsuccessful seeds only "
         f"(rel.$L^2<{rel_l2_threshold:g}$)"
@@ -374,47 +394,41 @@ def plot_comparison(
 
     def _success_stats(
         r: PipelineResult, attr: str
-    ) -> tuple[float, float, bool]:
-        """Mean and std over successful seeds.
+    ) -> tuple[float, float, float, bool]:
+        """Median and quartiles over successful seeds.
 
-        Returns ``(nan, nan, False)`` for pipelines without a single
+        Returns ``(nan, nan, nan, False)`` for pipelines without a single
         successful run. NaN, not 0.0: a zero-height bar on a log axis
         is -inf and pushes the y-limits to nonsense (10^-278 etc.).
         ``ax.bar`` skips NaN heights cleanly.
         """
         succ, _ = _partition_runs(r, rel_l2_threshold)
         if not succ:
-            return float("nan"), float("nan"), False
-        vals = [getattr(s, attr) for s in succ]
-        return float(np.mean(vals)), float(np.std(vals)), True
+            return float("nan"), float("nan"), float("nan"), False
+        med, q1, q3 = median_iqr([getattr(s, attr) for s in succ])
+        return med, q1, q3, True
 
-    means_J, stds_J, has_J = zip(
+    meds_J, q1_J, q3_J, has_J = zip(
         *(_success_stats(r, "final_J_val") for r in results)
     )
-    means_sol, stds_sol, has_sol = zip(
+    meds_sol, q1_sol, q3_sol, has_sol = zip(
         *(_success_stats(r, "final_sol_l2") for r in results)
     )
 
     x = np.arange(len(pipeline_names))
     cols = [PIPELINE_COLOR[p] for p in pipeline_names]
 
-    def _log_safe_yerr(
-        means: tuple[float, ...], stds: tuple[float, ...]
+    def _iqr_yerr(
+        meds: tuple[float, ...],
+        q1s: tuple[float, ...],
+        q3s: tuple[float, ...],
     ) -> np.ndarray:
-        """Convert symmetric ``mean +- std`` into asymmetric whiskers that
-        never reach <=0 on a log axis.
-
-        On a log y-axis, ``yerr=std`` is symmetric *in linear units*, so
-        whenever ``std > mean`` the lower whisker is non-positive and
-        matplotlib silently clips it to a tiny value, which then drives
-        the axis auto-limits to absurd numbers (10^-278). Capping the
-        lower whisker at ``0.95 * mean`` keeps it strictly positive while
-        still showing the seedwise spread when std < mean.
-        """
-        m = np.asarray(means, dtype=float)
-        s = np.asarray(stds, dtype=float)
-        lo = np.where(np.isfinite(m), np.minimum(s, 0.95 * np.abs(m)), 0.0)
-        hi = np.where(np.isfinite(m), s, 0.0)
+        """IQR whiskers around the median bar. All finite quantiles are
+        positive (the metrics are norms), so the lower whisker stays
+        strictly positive on the log axis with no special casing."""
+        m = np.asarray(meds, dtype=float)
+        lo = np.where(np.isfinite(m), m - np.asarray(q1s, dtype=float), 0.0)
+        hi = np.where(np.isfinite(m), np.asarray(q3s, dtype=float) - m, 0.0)
         return np.vstack([lo, hi])
 
     def _annotate_failures(
@@ -433,28 +447,25 @@ def plot_comparison(
             )
 
     def _set_log_ylim(
-        axis: plt.Axes, means: tuple[float, ...], stds: tuple[float, ...]
+        axis: plt.Axes, q1s: tuple[float, ...], q3s: tuple[float, ...]
     ) -> None:
         """Pin the log y-axis to a sensible band: half a decade below the
-        smallest finite (mean - std) and one decade above the largest
-        (mean + std). Prevents the auto-limit blow-up that produced the
+        smallest finite first quartile and half a decade above the largest
+        third quartile. Prevents the auto-limit blow-up that produced the
         10^-278 ticks."""
-        m = np.asarray(means, dtype=float)
-        s = np.asarray(stds, dtype=float)
-        mask = np.isfinite(m)
+        q1 = np.asarray(q1s, dtype=float)
+        q3 = np.asarray(q3s, dtype=float)
+        mask = np.isfinite(q1) & (q1 > 0)
         if not mask.any():
             return
-        lo_candidates = np.maximum(m[mask] - np.minimum(s[mask], 0.95 * m[mask]),
-                                   m[mask] * 0.05)
-        hi_candidates = m[mask] + s[mask]
-        lo = float(np.min(lo_candidates))
-        hi = float(np.max(hi_candidates))
+        lo = float(np.min(q1[mask]))
+        hi = float(np.max(q3[mask]))
         if lo <= 0 or not np.isfinite(lo) or not np.isfinite(hi):
             return
         axis.set_ylim(lo / np.sqrt(10.0), hi * np.sqrt(10.0))
 
     ax[1, 0].bar(
-        x, means_J, yerr=_log_safe_yerr(means_J, stds_J),
+        x, meds_J, yerr=_iqr_yerr(meds_J, q1_J, q3_J),
         color=cols, alpha=0.85, capsize=4,
     )
     ax[1, 0].set_yscale("log")
@@ -464,14 +475,14 @@ def plot_comparison(
     )
     ax[1, 0].set_ylabel(r"final $\mathcal{J}_{\mathrm{val}}$")
     ax[1, 0].set_title(
-        "Final residual over successful seeds (mean $\\pm$ std)"
+        "Final residual over successful seeds (median, IQR)"
     )
     ax[1, 0].grid(True, alpha=0.3, axis="y")
-    _set_log_ylim(ax[1, 0], means_J, stds_J)
+    _set_log_ylim(ax[1, 0], q1_J, q3_J)
     _annotate_failures(ax[1, 0], has_J)
 
     ax[1, 1].bar(
-        x, means_sol, yerr=_log_safe_yerr(means_sol, stds_sol),
+        x, meds_sol, yerr=_iqr_yerr(meds_sol, q1_sol, q3_sol),
         color=cols, alpha=0.85, capsize=4,
     )
     ax[1, 1].set_yscale("log")
@@ -481,10 +492,10 @@ def plot_comparison(
     )
     ax[1, 1].set_ylabel(r"final $\|u-u^*\|_{L^2}$")
     ax[1, 1].set_title(
-        "Final solution error over successful seeds (mean $\\pm$ std)"
+        "Final solution error over successful seeds (median, IQR)"
     )
     ax[1, 1].grid(True, alpha=0.3, axis="y")
-    _set_log_ylim(ax[1, 1], means_sol, stds_sol)
+    _set_log_ylim(ax[1, 1], q1_sol, q3_sol)
     _annotate_failures(ax[1, 1], has_sol)
 
     plt.tight_layout()
@@ -495,10 +506,10 @@ def plot_comparison(
 
 
 def _format_stat(values: list[float]) -> tuple[str, str]:
-    """Return ``(mean, std)`` formatted strings, or ``("n/a", "n/a")`` when empty."""
+    """Return ``(median, min)`` formatted strings, or ``("n/a", "n/a")`` when empty."""
     if not values:
         return "n/a", "n/a"
-    return f"{float(np.mean(values)):.4e}", f"{float(np.std(values)):.4e}"
+    return f"{float(np.median(values)):.4e}", f"{float(np.min(values)):.4e}"
 
 
 def write_summary(
@@ -522,24 +533,26 @@ def write_summary(
         f"Success criterion: final relative L^2 error < {rel_l2_threshold:g}.\n\n"
     )
 
-    lines.append("== Aggregate statistics over successful seeds ==\n")
+    lines.append(
+        "== Aggregate statistics over successful seeds (median / best run) ==\n"
+    )
     lines.append(
         f"{'pipeline':>20}  {'n_succ':>8}  "
-        f"{'mean J':>14}  {'std J':>14}    "
-        f"{'mean solL2':>14}  {'std solL2':>14}    "
-        f"{'mean relL2':>14}\n"
+        f"{'median J':>14}  {'min J':>14}    "
+        f"{'median solL2':>14}  {'min solL2':>14}    "
+        f"{'median relL2':>14}\n"
     )
     for r in results:
         succ = [s for s in r.seeds if is_successful(s, rel_l2_threshold)]
         n_succ = len(succ)
         n_total = len(r.seeds)
-        mJ, sJ = _format_stat([s.final_J_val for s in succ])
-        mS, sS = _format_stat([s.final_sol_l2 for s in succ])
+        mJ, bJ = _format_stat([s.final_J_val for s in succ])
+        mS, bS = _format_stat([s.final_sol_l2 for s in succ])
         mR, _ = _format_stat([s.final_sol_rel_l2 for s in succ])
         lines.append(
             f"{r.pipeline:>20}  {n_succ:>3d}/{n_total:<3d}  "
-            f"{mJ:>14}  {sJ:>14}    "
-            f"{mS:>14}  {sS:>14}    "
+            f"{mJ:>14}  {bJ:>14}    "
+            f"{mS:>14}  {bS:>14}    "
             f"{mR:>14}\n"
         )
 

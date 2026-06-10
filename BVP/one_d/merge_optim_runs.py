@@ -137,7 +137,7 @@ def main() -> None:
             merged,
             os.path.join(out_dir, f"optimiser_comparison_{tag}_portrait.png"),
             k=args.k, adam_warmup=args.adam_warmup,
-            rel_l2_threshold=args.threshold, figsize=(9.5, 13.0),
+            rel_l2_threshold=args.threshold, figsize=(11.0, 10.0),
         )
     print(f"Merged {len(args.results_dirs)} runs "
           f"({len(seeds)} seeds) into: {os.path.abspath(out_dir)}")

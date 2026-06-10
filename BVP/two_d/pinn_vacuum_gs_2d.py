@@ -145,6 +145,9 @@ class VacuumGSPINN:
         self.best_state: dict | None = None
         self.best_val_ma = float("inf")
         self.early_stop_epoch: int | None = None
+        # Box-Cox is engaged only from the start of the QN phase (identity
+        # during the Adam warm-up), matching the Helmholtz/CFGS sweeps.
+        self._in_qn_phase = False
 
     def _psi_hat(self, rz: torch.Tensor) -> torch.Tensor:
         return hard_ansatz(rz, self.model(rz))
@@ -178,7 +181,9 @@ class VacuumGSPINN:
 
     def _transform(self, J: torch.Tensor) -> torch.Tensor:
         eps = self.loss_eps
-        if self.loss_transform == "identity":
+        # Identity during the Adam warm-up; the transform acts only once the
+        # QN phase has started (set at handover in train()).
+        if self.loss_transform == "identity" or not self._in_qn_phase:
             return J
         if self.loss_transform == "sqrt":
             return torch.sqrt(J + eps)
@@ -344,6 +349,7 @@ class VacuumGSPINN:
 
                 if handover_now:
                     handover_done = True
+                    self._in_qn_phase = True
                     self.handover_epoch = epoch
                     self.best_val_ma = float("inf")
                     self.best_state = None
@@ -529,20 +535,23 @@ def plot_results(
 
     extent = (R_LO, R_HI, Z_LO, Z_HI)
     im0 = ax[0, 0].imshow(psi_true.T, origin="lower", extent=extent,
-                          cmap="viridis", aspect="auto")
+                          cmap="viridis", aspect="auto", interpolation="nearest")
     ax[0, 0].set_title(r"$\psi_{\mathrm{exact}}(R, Z) = R^2$")
     fig.colorbar(im0, ax=ax[0, 0], shrink=0.8)
 
     im1 = ax[0, 1].imshow(psi_pred.T, origin="lower", extent=extent,
-                          cmap="viridis", aspect="auto")
+                          cmap="viridis", aspect="auto", interpolation="nearest")
     ax[0, 1].set_title(r"$\widehat{\psi}_\theta(R, Z)$ (last seed)")
     fig.colorbar(im1, ax=ax[0, 1], shrink=0.8)
 
+    # Faithful per-pixel render of the noise-floor error (near-Nyquist in R):
+    # 'nearest' avoids antialiasing moire, and the log range is clipped to the
+    # top two decades so the map reads as amplitude, not zero-crossing spikes.
+    err_vmax = float(err.max()) + 1e-14
     im2 = ax[1, 0].imshow(
         err.T, origin="lower", extent=extent, cmap="inferno", aspect="auto",
-        norm=matplotlib.colors.LogNorm(
-            vmin=max(1e-14, err.min() + 1e-14), vmax=err.max() + 1e-14
-        ),
+        interpolation="nearest",
+        norm=matplotlib.colors.LogNorm(vmin=err_vmax / 100.0, vmax=err_vmax),
     )
     ax[1, 0].set_title(r"$|\widehat{\psi}_\theta - \psi_{\mathrm{exact}}|$ (log scale)")
     ax[1, 0].set_xlabel("R")
