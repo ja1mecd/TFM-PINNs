@@ -226,6 +226,9 @@ class PINN_Helmholtz_Solver:
 
         self.best_state: dict | None = None
         self.best_val_ma = float("inf")
+        # Box-Cox engages only from the start of the QN phase (identity during
+        # the Adam warm-up), matching the CFGS/vacuum-GS solvers.
+        self._in_qn_phase = False
 
         # (epoch, lambda) entries recorded each time the phase_ab schedule
         # commits to a new lambda. Empty when schedule is not used.
@@ -233,7 +236,11 @@ class PINN_Helmholtz_Solver:
 
     def _transform_objective(self, J_raw: torch.Tensor) -> torch.Tensor:
         eps = self.loss_eps
-        if self.loss_transform == "identity":
+        # Identity during the Adam warm-up; the transform acts only once the QN
+        # phase has started (set at handover in train()). This keeps the Adam
+        # phase on raw J, matching the CFGS/vacuum-GS solvers and the
+        # "identity loss during Adam" protocol stated in the thesis captions.
+        if self.loss_transform == "identity" or not self._in_qn_phase:
             return J_raw
         if self.loss_transform == "sqrt":
             return torch.sqrt(J_raw + eps)
@@ -814,6 +821,7 @@ class PINN_Helmholtz_Solver:
 
                 if handover_now:
                     handover_done = True
+                    self._in_qn_phase = True
                     self.handover_epoch = epoch
                     # Reset best-state and MA so QN-phase improvement over
                     # the (much higher) Adam-phase floor counts as new
