@@ -24,6 +24,14 @@ import numpy as np
 import torch
 import torch.optim as optim
 
+try:
+    # Cubic-interpolating strong-Wolfe line search shipped with
+    # torch.optim.LBFGS. Private but stable across torch 1.x-2.x (present in
+    # the 1.13.1/py3.7 build on the training machine).
+    from torch.optim.lbfgs import _strong_wolfe
+except ImportError:  # pragma: no cover
+    _strong_wolfe = None
+
 
 class SSBroydenOptimizer(optim.Optimizer):
     """Dense self-scaled (Broyden-family) quasi-Newton optimizer.
@@ -36,10 +44,17 @@ class SSBroydenOptimizer(optim.Optimizer):
         Which update formula to use for the inverse-Hessian approximation.
     lr : float, default 1.0
         Initial step length passed to the line search.
-    line_search : bool, default True
-        Whether to run an Armijo backtracking line search.
+    line_search : bool or {"armijo", "strong_wolfe"}, default True
+        Line-search mode. True (or "armijo") runs Armijo backtracking;
+        "strong_wolfe" runs a cubic-interpolating strong-Wolfe search whose
+        curvature condition guarantees y.s > 0, so the inverse-Hessian
+        update stays positive definite without H resets (matching scipy's
+        BFGS line search as used by Urban et al. 2025). False disables the
+        search (full step lr).
     c1 : float, default 1e-4
-        Armijo condition constant.
+        Armijo / sufficient-decrease condition constant.
+    c2 : float, default 0.9
+        Wolfe curvature condition constant (strong_wolfe mode only).
     backtrack : float, default 0.5
         Line-search contraction factor.
     max_ls : int, default 20
@@ -61,8 +76,9 @@ class SSBroydenOptimizer(optim.Optimizer):
         params,
         variant: str = "ssbroyden",
         lr: float = 1.0,
-        line_search: bool = True,
+        line_search: bool | str = True,
         c1: float = 1e-4,
+        c2: float = 0.9,
         backtrack: float = 0.5,
         max_ls: int = 20,
         damping: float = 1e-12,
@@ -75,11 +91,25 @@ class SSBroydenOptimizer(optim.Optimizer):
             raise ValueError(
                 f"variant must be one of {self._VALID_VARIANTS}, got {variant!r}"
             )
+        if isinstance(line_search, str) and line_search not in (
+            "armijo",
+            "strong_wolfe",
+        ):
+            raise ValueError(
+                "line_search must be a bool, 'armijo' or 'strong_wolfe', "
+                f"got {line_search!r}"
+            )
+        if line_search == "strong_wolfe" and _strong_wolfe is None:
+            raise RuntimeError(
+                "line_search='strong_wolfe' requires torch.optim.lbfgs."
+                "_strong_wolfe, which this torch build does not provide."
+            )
         defaults = dict(
             variant=variant,
             lr=lr,
             line_search=line_search,
             c1=c1,
+            c2=c2,
             backtrack=backtrack,
             max_ls=max_ls,
             damping=damping,
@@ -139,6 +169,7 @@ class SSBroydenOptimizer(optim.Optimizer):
         lr = group["lr"]
         line_search = group["line_search"]
         c1 = group["c1"]
+        c2 = group["c2"]
         backtrack = group["backtrack"]
         max_ls = group["max_ls"]
         damping = group["damping"]
@@ -158,35 +189,89 @@ class SSBroydenOptimizer(optim.Optimizer):
         Hg = self.H.matmul(gH)
         p_dir = (-Hg).to(g.device) if self.H.device != g.device else -Hg
 
-        gTp = torch.dot(g, p_dir).item()
+        gtd = torch.dot(g, p_dir)
+        gTp = float(gtd.item())
         f0 = float(loss.item())
 
-        # Armijo backtracking line search
-        alpha = lr
-        if line_search:
-            for _ in range(max_ls):
-                x_try = x + alpha * p_dir
-                self._set_param_vector(x_try)
-                f_try = float(loss_eval().item())
-                if f_try <= f0 + c1 * alpha * gTp:
-                    break
-                alpha *= backtrack
-            else:
-                alpha = 0.0
+        ls_mode = (
+            line_search
+            if isinstance(line_search, str)
+            else ("armijo" if line_search else "none")
+        )
 
-        if alpha == 0.0 or not np.isfinite(alpha):
-            self._set_param_vector(x)
-            if reset_on_fail:
+        if ls_mode == "strong_wolfe":
+            if gTp >= 0.0:
+                # H lost positive definiteness numerically; this step falls
+                # back to steepest descent and curvature is rebuilt from
+                # identity.
                 self._init_H(n, g, H_on_cpu, force=True)
-            return loss
+                p_dir = -g
+                gtd = torch.dot(g, p_dir)
+                gTp = float(gtd.item())
 
-        s = alpha * p_dir
-        x_new = x + s
-        self._set_param_vector(x_new)
+            def _wolfe_obj(x_base, t, d):
+                self._set_param_vector(x_base + t * d)
+                loss_t = closure()
+                g_t = self._get_grad_vector().detach().clone()
+                return float(loss_t.item()), g_t
 
-        new_loss = closure()
-        g_new = self._get_grad_vector().detach()
-        y = g_new - g
+            _, _, alpha, _ = _strong_wolfe(
+                _wolfe_obj,
+                x,
+                lr,
+                p_dir,
+                f0,
+                g.clone(),
+                gtd,
+                c1=c1,
+                c2=c2,
+                max_ls=max_ls,
+            )
+            alpha = float(alpha)
+            if (not np.isfinite(alpha)) or alpha <= 0.0:
+                self._set_param_vector(x)
+                if reset_on_fail:
+                    self._init_H(n, g, H_on_cpu, force=True)
+                return loss
+
+            s = alpha * p_dir
+            x_new = x + s
+            self._set_param_vector(x_new)
+
+            # Re-run the closure at the accepted iterate: the curvature pair
+            # needs the gradient there, and caller-side logging hooked into
+            # the closure (raw-J capture) must reflect the accepted point,
+            # not the last line-search trial.
+            new_loss = closure()
+            g_new = self._get_grad_vector().detach()
+            y = g_new - g
+        else:
+            # Armijo backtracking line search
+            alpha = lr
+            if ls_mode == "armijo":
+                for _ in range(max_ls):
+                    x_try = x + alpha * p_dir
+                    self._set_param_vector(x_try)
+                    f_try = float(loss_eval().item())
+                    if f_try <= f0 + c1 * alpha * gTp:
+                        break
+                    alpha *= backtrack
+                else:
+                    alpha = 0.0
+
+            if alpha == 0.0 or not np.isfinite(alpha):
+                self._set_param_vector(x)
+                if reset_on_fail:
+                    self._init_H(n, g, H_on_cpu, force=True)
+                return loss
+
+            s = alpha * p_dir
+            x_new = x + s
+            self._set_param_vector(x_new)
+
+            new_loss = closure()
+            g_new = self._get_grad_vector().detach()
+            y = g_new - g
 
         ys = torch.dot(y, s)
         if (not torch.isfinite(ys)) or (ys.abs() <= damping):

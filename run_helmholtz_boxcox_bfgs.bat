@@ -13,17 +13,18 @@ REM   - SSBroyden (self-scaled): expect transform ~redundant, as on CFGS.
 REM   - BFGS (not self-scaled):  does small lambda help (redundancy was the SSB
 REM     story) or still hurt (intrinsic anisotropy -> stronger claim)?
 REM
-REM Same dyadic lambda grid as CFGS (dense near 0, negative tail for the turnover,
-REM 0.75 anchor). These are two heavy sweeps; run them in two terminals if you
+REM Lambda grid [0,1] only (0=log, 0.5=sqrt, 1=identity + 0.25, 0.75). Negative
+REM lambda dropped: it over-amplifies and thrashes the BFGS line search for no
+REM useful signal. These are two heavy sweeps; run them in two terminals if you
 REM want them in parallel (split the two python lines below).
 
 cd /d "%~dp0"
 
 pushd BVP\two_d
-python boxcox_sweep_2d_helmholtz.py --qn-variant ssbroyden --lambdas -1 -0.5 -0.25 -0.125 0 0.125 0.25 0.5 0.75 1
+python boxcox_sweep_2d_helmholtz.py --qn-variant ssbroyden --lambdas 0 0.25 0.5 0.75 1
 set RC=%ERRORLEVEL%
 if not "%RC%"=="0" ( popd & goto :fail )
-python boxcox_sweep_2d_helmholtz.py --qn-variant bfgs --lambdas -1 -0.5 -0.25 -0.125 0 0.125 0.25 0.5 0.75 1
+python boxcox_sweep_2d_helmholtz.py --qn-variant bfgs --lambdas 0 0.25 0.5 0.75 1
 set RC=%ERRORLEVEL%
 popd
 if not "%RC%"=="0" goto :fail

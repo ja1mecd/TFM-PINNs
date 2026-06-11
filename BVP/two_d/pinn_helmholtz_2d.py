@@ -188,7 +188,11 @@ class PINN_Helmholtz_Solver:
         loss_eps: float = 1e-12,
         rel_err_eps: float = 1e-12,
         qn_variant: str = "ssbroyden",
+        qn_line_search: str = "armijo",
         qn_H_on_cpu: bool = False,
+        adam_beta1: float = 0.9,
+        adam_beta2: float = 0.999,
+        adam_eps: float = 1e-8,
     ) -> None:
         self.model = model.to(device)
         self.lambda_pde = float(lambda_pde)
@@ -200,15 +204,24 @@ class PINN_Helmholtz_Solver:
         self.loss_eps = float(loss_eps)
         self.rel_err_eps = float(rel_err_eps)
 
-        self.adam = optim.Adam(self.model.parameters(), lr=lr)
+        self.qn_line_search = str(qn_line_search)
+        self.adam = optim.Adam(
+            self.model.parameters(),
+            lr=lr,
+            betas=(adam_beta1, adam_beta2),
+            eps=adam_eps,
+        )
         self.quasi_newton = SSBroydenOptimizer(
             self.model.parameters(),
             variant=qn_variant,
             lr=1.0,
-            line_search=True,
+            line_search=self.qn_line_search,
             c1=1e-4,
+            c2=0.9,
             backtrack=0.5,
-            max_ls=20,
+            # 20 backtracking halvings for armijo (the standardised setting of
+            # every earlier sweep); 25 for strong_wolfe (torch LBFGS default).
+            max_ls=25 if self.qn_line_search == "strong_wolfe" else 20,
             damping=1e-12,
             tau_min=1e-6,
             tau_max=1.0,
@@ -510,6 +523,13 @@ class PINN_Helmholtz_Solver:
         scheduler_threshold: float = 1e-4,
         scheduler_gamma: float = 0.9,
         scheduler_min_lr: float = 1e-6,
+        # Adam lr schedule. "plateau" keeps the legacy ReduceLROnPlateau;
+        # "urban_exp" reproduces the Urban et al. (2025) protocol
+        # lr(t) = lr0 * decay_rate^(t / decay_steps)  (tf.keras
+        # ExponentialDecay with staircase=False).
+        adam_schedule: str = "plateau",
+        adam_decay_rate: float = 0.98,
+        adam_decay_steps: int = 1000,
         loss_lambda_schedule: str = "none",  # "none" | "phase_ab"
         lambda_phase_b_init: float = 0.5,
         lambda_block_size: int = 100,
@@ -533,6 +553,10 @@ class PINN_Helmholtz_Solver:
         else:
             print(f"  Loss transform:  {self.loss_transform}")
         qn_name = self.quasi_newton.param_groups[0]["variant"].upper()
+        print(
+            f"  QN line search:  {self.qn_line_search}  |  "
+            f"Adam schedule: {adam_schedule}"
+        )
         if handover_strategy == "fixed":
             qn_iters = n_epochs - adam_epochs
             if qn_iters > 0:
@@ -629,8 +653,27 @@ class PINN_Helmholtz_Solver:
                     threshold=scheduler_threshold,
                 )
 
-        sch_adam = make_plateau(self.adam)
-        sch_qn = make_plateau(self.quasi_newton)
+        if adam_schedule == "urban_exp":
+            sch_adam = optim.lr_scheduler.LambdaLR(
+                self.adam,
+                lr_lambda=lambda e: adam_decay_rate ** (e / float(adam_decay_steps)),
+            )
+        elif adam_schedule == "plateau":
+            sch_adam = make_plateau(self.adam)
+        else:
+            raise ValueError(
+                "adam_schedule must be 'plateau' or 'urban_exp', "
+                f"got {adam_schedule!r}"
+            )
+        # Under strong Wolfe the unit trial step must be re-offered every
+        # iteration (the search interpolates/extrapolates from there, as in
+        # scipy's BFGS); a plateau scheduler shrinking the QN lr would
+        # permanently cap it, so no QN scheduler in that mode.
+        sch_qn = (
+            None
+            if self.qn_line_search == "strong_wolfe"
+            else make_plateau(self.quasi_newton)
+        )
 
         self.best_state = None
         self.best_val_ma = float("inf")
@@ -882,7 +925,11 @@ class PINN_Helmholtz_Solver:
                                 )
                                 es_stopped_at = epoch
 
-            sch.step(float(val_obj.item()))
+            if sch is not None:
+                if isinstance(sch, optim.lr_scheduler.ReduceLROnPlateau):
+                    sch.step(float(val_obj.item()))
+                else:
+                    sch.step()
 
             # Diagnostics every epoch (printing throttled by verbose_freq).
             last_pde_l2 = self.compute_pde_l2(n=diag_grid_n)

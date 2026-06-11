@@ -16,17 +16,16 @@ REM
 REM 11 lambdas x 3 seeds. Pair the result with the existing SSBroyden2 sweep
 REM (cfgs_urban_SSBroyden2_boxcox_finesweep_20260611_130536) for the contrast.
 
-REM Lambda grid: dyadic spacing dense near 0 (where the transform turns from weak
-REM to strong and where Urban's optimum sat), extended into NEGATIVE lambda to
-REM find the help->hurt turnover (more amplification g'=J^{lambda-1} eventually
-REM over-amplifies and destabilises the line search), plus one anchor at 0.75
-REM because identity->sqrt is a real ~8x effect for BFGS (Urban Table 2).
-REM Expect very negative lambda to throw line-search failures -- that is signal.
+REM Lambda grid: lambda in [0,1] only. 0=log, 0.5=sqrt, 1=identity (Urban's three
+REM points) plus 0.25 and 0.75. Negative lambda was dropped: with the dense
+REM strong-Wolfe BFGS it over-amplifies (g'=J^{lambda-1}=J^{-2} at lambda=-1),
+REM thrashes the line search, and costs ~40 min/seed for no useful signal (the
+REM most-concave informative point is log at lambda=0). [0,1] runs far faster.
 
 cd /d "%~dp0"
 
 pushd BVP\two_d
-python boxcox_sweep_2d_cfgs.py --variant BFGS --lambdas -1 -0.5 -0.25 -0.125 0 0.125 0.25 0.5 0.75 1
+python boxcox_sweep_2d_cfgs.py --variant BFGS --lambdas 0 0.25 0.5 0.75 1
 set RC=%ERRORLEVEL%
 popd
 if not "%RC%"=="0" goto :fail

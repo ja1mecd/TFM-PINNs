@@ -79,11 +79,16 @@ def run_one(
     hidden: tuple[int, ...],
     lr: float,
     qn_variant: str,
+    qn_line_search: str,
+    adam_schedule: str,
+    adam_beta1: float,
+    adam_eps: float,
     handover_strategy: str,
     handover_max_adam_epochs: int,
     plateau_patience: int,
     plateau_min_delta: float,
     patience: int,
+    es_patience: int,
 ) -> SeedResult:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -98,6 +103,9 @@ def run_one(
         loss_transform="boxcox",
         loss_lambda=lam,
         qn_variant=qn_variant,
+        qn_line_search=qn_line_search,
+        adam_beta1=adam_beta1,
+        adam_eps=adam_eps,
     )
     pinn.train(
         n_epochs=n_epochs,
@@ -110,6 +118,8 @@ def run_one(
         plateau_patience=plateau_patience,
         plateau_min_delta=plateau_min_delta,
         patience=patience,
+        es_patience=es_patience,
+        adam_schedule=adam_schedule,
         min_delta=1e-12,
         moving_avg_window=20,
     )
@@ -135,11 +145,16 @@ def run_sweep(
     hidden: tuple[int, ...],
     lr: float,
     qn_variant: str,
+    qn_line_search: str,
+    adam_schedule: str,
+    adam_beta1: float,
+    adam_eps: float,
     handover_strategy: str,
     handover_max_adam_epochs: int,
     plateau_patience: int,
     plateau_min_delta: float,
     patience: int,
+    es_patience: int,
 ) -> tuple[LambdaResult, ...]:
     out: list[LambdaResult] = []
     for lam in lambdas:
@@ -147,7 +162,8 @@ def run_sweep(
         for s in seeds:
             print(
                 f"\n[2DH lambda={lam:g}, seed={s}]  "
-                f"handover={handover_strategy}, qn_patience={patience}"
+                f"handover={handover_strategy}, qn_patience={patience}, "
+                f"ls={qn_line_search}"
             )
             seed_runs.append(run_one(
                 lam=lam, seed=s,
@@ -156,11 +172,16 @@ def run_sweep(
                 n_collocation=n_collocation,
                 hidden=hidden, lr=lr,
                 qn_variant=qn_variant,
+                qn_line_search=qn_line_search,
+                adam_schedule=adam_schedule,
+                adam_beta1=adam_beta1,
+                adam_eps=adam_eps,
                 handover_strategy=handover_strategy,
                 handover_max_adam_epochs=handover_max_adam_epochs,
                 plateau_patience=plateau_patience,
                 plateau_min_delta=plateau_min_delta,
                 patience=patience,
+                es_patience=es_patience,
             ))
         out.append(LambdaResult(lambda_=lam, seeds=tuple(seed_runs)))
     return tuple(out)
@@ -256,12 +277,15 @@ def write_summary(
     adam_epochs: int,
     seeds: tuple[int, ...],
     hidden: tuple[int, ...] = (),
+    qn_line_search: str = "armijo",
+    adam_schedule: str = "plateau",
 ) -> None:
     arch = "x".join(str(h) for h in hidden) if hidden else "?"
     lines: list[str] = []
     lines.append(
         f"2D Helmholtz Box-Cox sweep, (a1, a2)=({a1}, {a2}), k={k:g}, "
-        f"net={arch}, qn={qn_variant}, epochs={n_epochs} (adam={adam_epochs}), "
+        f"net={arch}, qn={qn_variant}, ls={qn_line_search}, "
+        f"adam_sched={adam_schedule}, epochs={n_epochs} (adam={adam_epochs}), "
         f"seeds={list(seeds)}\n\n"
     )
     lines.append(
@@ -312,6 +336,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="ssbroyden",
         choices=["bfgs", "ssbfgs", "ssbroyden"],
     )
+    p.add_argument(
+        "--qn-line-search",
+        type=str,
+        default="armijo",
+        choices=["armijo", "strong_wolfe"],
+        help="QN line search. 'armijo' is the legacy backtracking search "
+             "(all sweeps before 2026-06-11); 'strong_wolfe' enforces the "
+             "curvature condition so BFGS keeps a positive-definite H "
+             "without resets, matching scipy/Urban et al.",
+    )
+    p.add_argument(
+        "--adam-schedule",
+        type=str,
+        default="plateau",
+        choices=["plateau", "urban_exp"],
+        help="Adam lr schedule. 'urban_exp' is lr0 * 0.98^(epoch/1000) "
+             "(Urban et al. protocol); pair with --lr 5e-3.",
+    )
+    p.add_argument("--adam-beta1", type=float, default=0.9,
+                   help="Adam beta1 (Urban et al. use 0.99).")
+    p.add_argument("--adam-eps", type=float, default=1e-8,
+                   help="Adam epsilon (Urban et al. use 1e-20).")
+    p.add_argument(
+        "--es-patience",
+        type=int,
+        default=300,
+        help="Urban-style relative-MA early-stop patience (QN phase). "
+             "Raise for long-horizon BFGS runs so slow-starting transformed "
+             "losses are not cut before their descent regime.",
+    )
     p.add_argument("--epochs", type=int, default=10000,
                    help="Total budget cap (2000 Adam + up to 8000 QN); QN-phase "
                         "early stopping ends most runs well before this.")
@@ -355,16 +409,20 @@ def main(argv: list[str] | None = None) -> None:
 
     seeds = tuple(args.seeds)
     run_tag = time.strftime("%Y%m%d_%H%M%S")
+    qn_tag = args.qn_variant
+    if args.qn_line_search == "strong_wolfe":
+        qn_tag += "wolfe"
     out_dir = os.path.join(
         args.results_dir,
-        f"helmholtz2d_a{args.a1}_{args.a2}_k{args.k:g}_boxcox_finesweep_{args.qn_variant}_{run_tag}",
+        f"helmholtz2d_a{args.a1}_{args.a2}_k{args.k:g}_boxcox_finesweep_{qn_tag}_{run_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
     print(
         f"\n2D Helmholtz Box-Cox sweep "
         f"((a1,a2)=({args.a1}, {args.a2}), k={args.k:g}, "
-        f"qn={args.qn_variant}, epochs={args.epochs}, adam={args.adam_epochs})\n"
+        f"qn={args.qn_variant}, ls={args.qn_line_search}, "
+        f"epochs={args.epochs}, adam={args.adam_epochs})\n"
         f"  lambdas: {lambdas}\n"
         f"  seeds:   {seeds}\n"
     )
@@ -376,11 +434,16 @@ def main(argv: list[str] | None = None) -> None:
         n_collocation=args.n_collocation,
         hidden=tuple(args.hidden), lr=args.lr,
         qn_variant=args.qn_variant,
+        qn_line_search=args.qn_line_search,
+        adam_schedule=args.adam_schedule,
+        adam_beta1=args.adam_beta1,
+        adam_eps=args.adam_eps,
         handover_strategy=args.handover_strategy,
         handover_max_adam_epochs=args.handover_max_adam_epochs,
         plateau_patience=args.plateau_patience,
         plateau_min_delta=args.plateau_min_delta,
         patience=args.patience,
+        es_patience=args.es_patience,
     )
 
     write_summary(
@@ -391,6 +454,8 @@ def main(argv: list[str] | None = None) -> None:
         n_epochs=args.epochs, adam_epochs=args.adam_epochs,
         seeds=seeds,
         hidden=tuple(args.hidden),
+        qn_line_search=args.qn_line_search,
+        adam_schedule=args.adam_schedule,
     )
     plot_sweep(
         results=results,
