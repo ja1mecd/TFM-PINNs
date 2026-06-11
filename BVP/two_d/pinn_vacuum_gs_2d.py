@@ -190,10 +190,18 @@ class VacuumGSPINN:
         if self.loss_transform == "log":
             return torch.log(J + eps)
         if self.loss_transform == "boxcox":
+            # Offset-free Box-Cox  g_lambda(J) = (J+eps)^lambda / lambda  (log at
+            # lambda=0). Same gradient J^{lambda-1} and rank-one Hessian term as
+            # the textbook (J^lambda - 1)/lambda, but it drops the -1/lambda
+            # constant. That constant is mathematically inert (zero gradient),
+            # yet in float32 it pins the objective value near -1/lambda and the
+            # tiny residual J is rounded away in the QN line-search comparison
+            # once J falls below the ULP (~1.2e-7 near 1), stalling SSBroyden.
+            # The offset-free form keeps the value small-positive and resolvable.
             lam = self.loss_lambda
             if lam == 0.0:
                 return torch.log(J + eps)
-            return torch.expm1(lam * torch.log(J + eps)) / lam
+            return torch.exp(lam * torch.log(J + eps)) / lam
         raise ValueError(f"unknown transform {self.loss_transform!r}")
 
     def compute_loss(self, rz: torch.Tensor, create_graph_second: bool):

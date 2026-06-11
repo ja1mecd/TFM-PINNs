@@ -1,11 +1,13 @@
 """Regenerate the CFGS benchmark figure (Figure: fig:cfgs-ssbroyden) from the
 already-saved run, without retraining.
 
-The pointwise/relative-error heatmaps are recomputed deterministically from the
-saved model checkpoint (exact + predicted fields), and the loss/error curves are
-taken verbatim from the run's ``logs.npz``. Only the plotting code changed (the
-bottom-left relative-error panel now uses a log color scale), so the rendered
-figure is identical to the original run except for that panel.
+The error heatmap is recomputed deterministically from the saved model
+checkpoint (exact + predicted fields), and the loss/error curves are taken
+verbatim from the run's ``logs.npz``. Only the plotting code changed, so the
+rendered figure matches the original run apart from the new layout. The figure
+is now a 2x2 grid: exact and predicted fields on top, the absolute error on a
+log color scale plus the combined loss and L2-error history on the bottom. The
+relative-error panel was dropped.
 
 Usage:
     python regenerate_cfgs_figure.py
@@ -22,7 +24,7 @@ from pinn_ssbroyden_2d import NeuralNetwork  # noqa: E402
 from pinn_ssbroyden_2d_urban import PINN_CFGS_Solver_Urban  # noqa: E402
 
 RUN_DIR = os.path.join(
-    "..", "results", "cfgs_urban_SSBroyden2_identity_20260521_185722"
+    "..", "results", "cfgs_urban_SSBroyden2_identity_20260608_212341"
 )
 MODEL_PATH = os.path.join("..", "models", "pinn_cfgs_urban_SSBroyden2_identity.pth")
 # Match the original run (metadata.json: variant SSBroyden2, identity, lambda 0.5)

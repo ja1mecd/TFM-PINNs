@@ -194,7 +194,7 @@ class PoissonPINN:
             lam = self.loss_lambda
             if lam == 0.0:
                 return torch.log(J + eps)
-            return torch.expm1(lam * torch.log(J + eps)) / lam
+            return torch.exp(lam * torch.log(J + eps)) / lam
         raise ValueError(f"unknown transform {self.loss_transform!r}")
 
     def compute_loss(self, xy: torch.Tensor, create_graph_second: bool):

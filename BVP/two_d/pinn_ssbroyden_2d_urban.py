@@ -92,10 +92,17 @@ def transform_loss(J_raw: torch.Tensor, kind: str, lam: float, eps: float) -> to
     if kind == "log":
         return torch.log(J_raw + eps)
     if kind == "boxcox":
+        # Offset-free Box-Cox  g_lambda(J) = (J+eps)^lambda / lambda  (log at
+        # lambda=0). Same gradient J^{lambda-1} and rank-one Hessian term as the
+        # textbook (J^lambda - 1)/lambda, but it drops the -1/lambda constant.
+        # That constant is mathematically inert (zero gradient), yet in float32
+        # it pins the objective near -1/lambda and the tiny residual J is rounded
+        # away in the QN line-search value comparison once J < ULP (~1.2e-7 near
+        # 1), stalling SSBroyden near lambda=1. Offset-free keeps it resolvable.
         shifted = J_raw + eps
         if lam == 0.0:
             return torch.log(shifted)
-        return torch.expm1(lam * torch.log(shifted)) / lam
+        return torch.exp(lam * torch.log(shifted)) / lam
     raise ValueError(f"Unknown loss_transform={kind!r}")
 
 
@@ -518,9 +525,8 @@ class PINN_CFGS_Solver_Urban:
         with torch.no_grad():
             u_pred = self._P_hat(QMt).cpu().numpy().reshape(n, n)
         abs_err = np.abs(u_pred - u_true)
-        rel_err = abs_err / (np.abs(u_true) + self.rel_err_eps)
 
-        fig, ax = plt.subplots(2, 3, figsize=(16, 9))
+        fig, ax = plt.subplots(2, 2, figsize=(12, 9))
 
         im0 = ax[0, 0].imshow(
             u_true, origin="lower", extent=[q_min, q_max, mu_min, mu_max], aspect="auto"
@@ -534,32 +540,26 @@ class PINN_CFGS_Solver_Urban:
         ax[0, 1].set_title(r"$P_{\mathrm{PINN}}(q, \mu)$")
         plt.colorbar(im1, ax=ax[0, 1], fraction=0.046)
 
-        im2 = ax[0, 2].imshow(
-            abs_err, origin="lower",
+        # Absolute error on a logarithmic color scale: floor the lower bound at a
+        # positive value and cap the dynamic range to ~4 decades so a handful of
+        # near-zero pixels do not dominate the colormap (LogNorm masks
+        # non-positive values).
+        abs_vmax = float(np.percentile(abs_err, 99))
+        if not np.isfinite(abs_vmax) or abs_vmax <= 0.0:
+            abs_vmax = float(np.nanmax(abs_err)) if np.isfinite(np.nanmax(abs_err)) else 1.0
+        abs_pos = abs_err[abs_err > 0.0]
+        abs_vmin = float(np.percentile(abs_pos, 1)) if abs_pos.size else abs_vmax / 1e4
+        abs_vmin = max(abs_vmin, abs_vmax / 1e4)
+        im2 = ax[1, 0].imshow(
+            np.clip(abs_err, abs_vmin, abs_vmax), origin="lower",
             extent=[q_min, q_max, mu_min, mu_max], aspect="auto",
-        )
-        ax[0, 2].set_title(r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|$")
-        plt.colorbar(im2, ax=ax[0, 2], fraction=0.046)
-
-        rel_vmax = float(np.percentile(rel_err, 99))
-        if not np.isfinite(rel_vmax) or rel_vmax <= 0.0:
-            rel_vmax = float(np.nanmax(rel_err)) if np.isfinite(np.nanmax(rel_err)) else 1.0
-        # Log color scale: floor the lower bound at a positive value and cap the
-        # dynamic range to ~4 decades so a handful of near-zero pixels do not
-        # dominate the colormap (LogNorm masks non-positive values).
-        rel_pos = rel_err[rel_err > 0.0]
-        rel_vmin = float(np.percentile(rel_pos, 1)) if rel_pos.size else rel_vmax / 1e4
-        rel_vmin = max(rel_vmin, rel_vmax / 1e4)
-        im3 = ax[1, 0].imshow(
-            np.clip(rel_err, rel_vmin, rel_vmax), origin="lower",
-            extent=[q_min, q_max, mu_min, mu_max], aspect="auto",
-            norm=LogNorm(vmin=rel_vmin, vmax=rel_vmax),
+            norm=LogNorm(vmin=abs_vmin, vmax=abs_vmax),
         )
         ax[1, 0].set_title(
-            r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|/(|P_{\mathrm{exact}}| + \varepsilon)$"
-            f"  (log, {rel_vmin:.1e}–{rel_vmax:.1e})"
+            r"$|P_{\mathrm{PINN}} - P_{\mathrm{exact}}|$"
+            f"  (log, {abs_vmin:.1e}–{abs_vmax:.1e})"
         )
-        plt.colorbar(im3, ax=ax[1, 0], fraction=0.046, extend="both")
+        plt.colorbar(im2, ax=ax[1, 0], fraction=0.046)
 
         ax[1, 1].semilogy(np.maximum(self.J_train, 1e-300), label="J(train)")
         ax[1, 1].semilogy(np.maximum(self.J_val, 1e-300), label="J(val)")
@@ -568,18 +568,13 @@ class PINN_CFGS_Solver_Urban:
                 np.maximum(self.obj_train, 1e-300), "--",
                 label=f"g(J) train [{self.loss_transform}]",
             )
+        ax[1, 1].semilogy(self.pde_l2, label=r"$\|res\|_{L^2}$")
+        ax[1, 1].semilogy(self.sol_l2, label=r"$\|P_{\mathrm{NN}} - P_{\mathrm{exact}}\|_{L^2}$")
+        ax[1, 1].semilogy(self.sol_rel_l2, label=r"rel $L^2$")
         ax[1, 1].set_xlabel("iteration")
-        ax[1, 1].set_title("Loss curves")
+        ax[1, 1].set_title(r"Loss and $L^2$ errors")
         ax[1, 1].grid(True, alpha=0.3)
-        ax[1, 1].legend()
-
-        ax[1, 2].semilogy(self.pde_l2, label=r"$\|res\|_{L^2}$")
-        ax[1, 2].semilogy(self.sol_l2, label=r"$\|P_{\mathrm{NN}} - P_{\mathrm{exact}}\|_{L^2}$")
-        ax[1, 2].semilogy(self.sol_rel_l2, label=r"rel $L^2$")
-        ax[1, 2].set_xlabel("iteration")
-        ax[1, 2].set_title(r"$L^2$ errors")
-        ax[1, 2].grid(True, alpha=0.3)
-        ax[1, 2].legend()
+        ax[1, 1].legend(fontsize="small")
 
         plt.tight_layout()
         if save_path is None:

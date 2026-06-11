@@ -240,16 +240,20 @@ class PINN_Helmholtz_Solver:
         if self.loss_transform == "log":
             return torch.log(J_raw + eps)
         if self.loss_transform == "boxcox":
-            # Box-Cox transformation g_lambda(J + eps) = (expm1(lam * log(J + eps))) / lam,
-            # falling back to log(J + eps) at lam == 0. The expm1 form avoids the
-            # catastrophic cancellation of the naive ((J + eps)^lam - 1) / lam expression
-            # for small |lam|, the regime where Box-Cox interpolates smoothly between
-            # the square-root (lam=0.5) and logarithmic (lam=0) transformations.
+            # Offset-free Box-Cox  g_lambda(J) = (J+eps)^lambda / lambda  (log at
+            # lambda=0). Same gradient J^{lambda-1} and rank-one Hessian term as
+            # the textbook (J^lambda - 1)/lambda, but it drops the -1/lambda
+            # constant. The constant is mathematically inert (zero gradient), yet
+            # in float32 it pins the objective near -1/lambda and the tiny
+            # residual J is rounded away in the QN line-search value comparison
+            # once J < ULP (~1.2e-7 near 1), stalling SSBroyden near lambda=1.
+            # (The earlier expm1 form computed (J^lam - 1)/lam accurately, which
+            # is exactly the offending constant; offset-free avoids both issues.)
             lam = self.loss_lambda
             shifted = J_raw + eps
             if lam == 0.0:
                 return torch.log(shifted)
-            return torch.expm1(lam * torch.log(shifted)) / lam
+            return torch.exp(lam * torch.log(shifted)) / lam
         raise ValueError(f"Unknown loss_transform={self.loss_transform!r}")
 
     def _u_hat(self, xy: torch.Tensor) -> torch.Tensor:

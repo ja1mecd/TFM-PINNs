@@ -330,7 +330,7 @@ class PINN_NLGS_Solver:
             shifted = J_raw + eps
             if lam == 0.0:
                 return torch.log(shifted)
-            return torch.expm1(lam * torch.log(shifted)) / lam
+            return torch.exp(lam * torch.log(shifted)) / lam
         raise ValueError(f"Unknown loss_transform={self.loss_transform!r}")
 
     # ---- hard Dirichlet BC on the (q, mu) rectangle ----

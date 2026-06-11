@@ -214,7 +214,7 @@ class PINN_NLP_Solver:
             shifted = J_raw + eps
             if lam == 0.0:
                 return torch.log(shifted)
-            return torch.expm1(lam * torch.log(shifted)) / lam
+            return torch.exp(lam * torch.log(shifted)) / lam
         raise ValueError(f"Unknown loss_transform={self.loss_transform!r}")
 
     def _phi_hat(self, xy: torch.Tensor) -> torch.Tensor:

@@ -123,7 +123,7 @@ def transform_loss(J_raw: torch.Tensor, kind: str, lam: float, eps: float) -> to
         shifted = J_raw + eps
         if lam == 0.0:
             return torch.log(shifted)
-        return torch.expm1(lam * torch.log(shifted)) / lam
+        return torch.exp(lam * torch.log(shifted)) / lam
     raise ValueError(f"Unknown loss_transform={kind!r}")
 
 
