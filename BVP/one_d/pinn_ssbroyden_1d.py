@@ -54,6 +54,7 @@ _OPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "optim
 if _OPT_DIR not in sys.path:
     sys.path.insert(0, _OPT_DIR)
 from ssbroyden import SSBroydenOptimizer  # noqa: E402
+from ssbroyden_urban import SSBroydenUrbanOptimizer  # noqa: E402
 
 
 # =============================================================================
@@ -133,6 +134,15 @@ class PINN_BVP_SSBroyden:
         qn_backtrack: float = 0.5,
         qn_max_ls: int = 20,
         qn_reset_on_fail: bool = True,
+        # ---- second QN engine: Urban float64 + strong-Wolfe self-scaled ----
+        # qn_engine="inhouse" (default) keeps the historical float32 Armijo
+        # SSBroyden path byte-for-byte; qn_engine="urban" swaps in the
+        # SSBroydenUrbanOptimizer using the qn_wolfe_* / qn_initial_scale knobs.
+        qn_engine: str = "inhouse",
+        qn_wolfe_c1: float = 1e-4,
+        qn_wolfe_c2: float = 0.9,
+        qn_wolfe_max_ls: int = 25,
+        qn_initial_scale: bool = False,
     ) -> None:
         self.model = model.to(device)
         self.k = float(k)
@@ -141,23 +151,48 @@ class PINN_BVP_SSBroyden:
         self.loss_lambda = float(loss_lambda)
         self.loss_eps = float(loss_eps)
         self.rel_err_eps = float(rel_err_eps)
+        self.qn_engine = str(qn_engine)
 
         self.adam = optim.Adam(self.model.parameters(), lr=lr)
-        self.quasi_newton = SSBroydenOptimizer(
-            self.model.parameters(),
-            variant=qn_variant,
-            lr=1.0,
-            line_search=qn_line_search,
-            c1=qn_c1,
-            c2=qn_c2,
-            backtrack=qn_backtrack,
-            max_ls=qn_max_ls,
-            damping=1e-12,
-            tau_min=1e-6,
-            tau_max=1.0,
-            reset_on_fail=qn_reset_on_fail,
-            H_on_cpu=qn_H_on_cpu,
-        )
+        if self.qn_engine == "inhouse":
+            self.quasi_newton = SSBroydenOptimizer(
+                self.model.parameters(),
+                variant=qn_variant,
+                lr=1.0,
+                line_search=qn_line_search,
+                c1=qn_c1,
+                c2=qn_c2,
+                backtrack=qn_backtrack,
+                max_ls=qn_max_ls,
+                damping=1e-12,
+                tau_min=1e-6,
+                tau_max=1.0,
+                reset_on_fail=qn_reset_on_fail,
+                H_on_cpu=qn_H_on_cpu,
+            )
+        elif self.qn_engine == "urban":
+            urban_variant = {
+                "ssbroyden": "SSBroyden2",
+                "bfgs": "BFGS",
+                "ssbfgs": "SSBFGS_AB",
+            }.get(qn_variant, "SSBroyden2")
+            self.quasi_newton = SSBroydenUrbanOptimizer(
+                self.model.parameters(),
+                variant=urban_variant,
+                c1=qn_wolfe_c1,
+                c2=qn_wolfe_c2,
+                max_ls=qn_wolfe_max_ls,
+                initial_scale=qn_initial_scale,
+                tau_min=1e-12,
+                tau_max=None,
+                damping=1e-30,
+                dtype=torch.float64,
+                H_device="cpu" if qn_H_on_cpu else None,
+            )
+        else:
+            raise ValueError(
+                "qn_engine must be 'inhouse' or 'urban', got %r" % (qn_engine,)
+            )
 
         # Logs
         self.obj_train: list[float] = []
@@ -326,7 +361,14 @@ class PINN_BVP_SSBroyden:
             )
 
         sch_adam = make_plateau(self.adam)
-        sch_qn = make_plateau(self.quasi_newton)
+        # The urban engine has no per-group "lr" (it self-scales via the Wolfe
+        # line search), so a ReduceLROnPlateau cannot attach to it. For the
+        # inhouse engine the QN scheduler is built and stepped exactly as
+        # before; for urban it is a no-op (None) and never read.
+        if self.qn_engine == "inhouse":
+            sch_qn = make_plateau(self.quasi_newton)
+        else:
+            sch_qn = None
 
         ma_buf: list[float] = []
         epochs_no_improve = 0
@@ -357,21 +399,53 @@ class PINN_BVP_SSBroyden:
             else:
                 holder: dict = {}
 
-                def closure():
-                    opt.zero_grad()
-                    J_obj_c, J_raw_c = self.compute_loss(
-                        x_train, create_graph_second=True
-                    )
-                    holder["J_raw"] = J_raw_c
-                    J_obj_c.backward()
-                    return J_obj_c
+                if self.qn_engine == "urban":
+                    def loss_and_grad(x_vec):
+                        with torch.no_grad():
+                            offset = 0
+                            for p in self.model.parameters():
+                                numel = p.numel()
+                                p.copy_(
+                                    x_vec[offset:offset + numel]
+                                    .to(p.dtype)
+                                    .view_as(p)
+                                )
+                                offset += numel
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                p.grad.zero_()
+                        J_obj_c, J_raw_c = self.compute_loss(
+                            x_train, create_graph_second=True
+                        )
+                        J_obj_c.backward()
+                        grads = torch.cat([
+                            (p.grad if p.grad is not None
+                             else torch.zeros_like(p)).detach().view(-1)
+                            for p in self.model.parameters()
+                        ])
+                        holder["J_raw"] = J_raw_c
+                        return J_obj_c.detach(), grads
 
-                def loss_eval():
-                    J_obj_e, _ = self.compute_loss(x_train, create_graph_second=False)
-                    return J_obj_e
+                    J_obj = opt.step(loss_and_grad)
+                    J_raw = holder["J_raw"]
+                else:
+                    def closure():
+                        opt.zero_grad()
+                        J_obj_c, J_raw_c = self.compute_loss(
+                            x_train, create_graph_second=True
+                        )
+                        holder["J_raw"] = J_raw_c
+                        J_obj_c.backward()
+                        return J_obj_c
 
-                J_obj = opt.step(closure, loss_eval)
-                J_raw = holder["J_raw"]
+                    def loss_eval():
+                        J_obj_e, _ = self.compute_loss(
+                            x_train, create_graph_second=False
+                        )
+                        return J_obj_e
+
+                    J_obj = opt.step(closure, loss_eval)
+                    J_raw = holder["J_raw"]
 
             with torch.set_grad_enabled(True):
                 val_obj, val_raw = self.compute_loss(
@@ -398,7 +472,8 @@ class PINN_BVP_SSBroyden:
             else:
                 epochs_no_improve += 1
 
-            sch.step(float(val_obj.item()))
+            if sch is not None:
+                sch.step(float(val_obj.item()))
 
             # Diagnostics every epoch (printing stays throttled below). The old
             # every-verbose_freq sampling produced a coarse solution-error
@@ -622,6 +697,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["bfgs", "ssbfgs", "ssbroyden"],
     )
     p.add_argument(
+        "--engine",
+        type=str,
+        default="inhouse",
+        choices=["inhouse", "urban"],
+        help="Quasi-Newton engine for the refinement phase. 'inhouse' keeps "
+             "the float32 Armijo SSBroyden; 'urban' uses the float64 "
+             "strong-Wolfe self-scaled optimiser.",
+    )
+    p.add_argument(
         "--loss-transform",
         type=str,
         default="identity",
@@ -692,6 +776,7 @@ def main(argv: list[str] | None = None) -> None:
         loss_lambda=args.loss_lambda,
         loss_eps=args.loss_eps,
         qn_variant=args.qn_variant,
+        qn_engine=args.engine,
     )
 
     # Single-shot ("PDE problem solving") mode: early stopping ON by default.
@@ -718,9 +803,10 @@ def main(argv: list[str] | None = None) -> None:
         else args.loss_transform
     )
     run_tag = time.strftime("%Y%m%d_%H%M%S")
+    engine_tag = "_urban" if args.engine == "urban" else ""
     run_name = (
         f"{args.run_tag_prefix}_k{args.wavenumber:g}_"
-        f"{args.qn_variant}_{transform_tag}_{run_tag}"
+        f"{args.qn_variant}{engine_tag}_{transform_tag}_{run_tag}"
     )
     run_dir = os.path.join(args.results_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)

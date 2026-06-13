@@ -42,6 +42,7 @@ catastrophic cancellation for small |lambda|.
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -61,6 +62,7 @@ _OPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "optim
 if _OPT_DIR not in sys.path:
     sys.path.insert(0, _OPT_DIR)
 from ssbroyden import SSBroydenOptimizer  # noqa: E402
+from ssbroyden_urban import SSBroydenUrbanOptimizer  # noqa: E402
 
 
 # =============================================================================
@@ -190,6 +192,11 @@ class PINN_Helmholtz_Solver:
         qn_variant: str = "ssbroyden",
         qn_line_search: str = "armijo",
         qn_H_on_cpu: bool = False,
+        qn_engine: str = "inhouse",
+        qn_wolfe_c1: float = 1e-4,
+        qn_wolfe_c2: float = 0.9,
+        qn_wolfe_max_ls: int = 25,
+        qn_initial_scale: bool = False,
         adam_beta1: float = 0.9,
         adam_beta2: float = 0.999,
         adam_eps: float = 1e-8,
@@ -205,29 +212,50 @@ class PINN_Helmholtz_Solver:
         self.rel_err_eps = float(rel_err_eps)
 
         self.qn_line_search = str(qn_line_search)
+        self.qn_engine = str(qn_engine)
         self.adam = optim.Adam(
             self.model.parameters(),
             lr=lr,
             betas=(adam_beta1, adam_beta2),
             eps=adam_eps,
         )
-        self.quasi_newton = SSBroydenOptimizer(
-            self.model.parameters(),
-            variant=qn_variant,
-            lr=1.0,
-            line_search=self.qn_line_search,
-            c1=1e-4,
-            c2=0.9,
-            backtrack=0.5,
-            # 20 backtracking halvings for armijo (the standardised setting of
-            # every earlier sweep); 25 for strong_wolfe (torch LBFGS default).
-            max_ls=25 if self.qn_line_search == "strong_wolfe" else 20,
-            damping=1e-12,
-            tau_min=1e-6,
-            tau_max=1.0,
-            reset_on_fail=True,
-            H_on_cpu=qn_H_on_cpu,
-        )
+        if self.qn_engine == "inhouse":
+            self.quasi_newton = SSBroydenOptimizer(
+                self.model.parameters(),
+                variant=qn_variant,
+                lr=1.0,
+                line_search=self.qn_line_search,
+                c1=1e-4,
+                c2=0.9,
+                backtrack=0.5,
+                # 20 backtracking halvings for armijo (the standardised setting of
+                # every earlier sweep); 25 for strong_wolfe (torch LBFGS default).
+                max_ls=25 if self.qn_line_search == "strong_wolfe" else 20,
+                damping=1e-12,
+                tau_min=1e-6,
+                tau_max=1.0,
+                reset_on_fail=True,
+                H_on_cpu=qn_H_on_cpu,
+            )
+        elif self.qn_engine == "urban":
+            urban_variant = {
+                "ssbroyden": "SSBroyden2",
+                "bfgs": "BFGS",
+                "ssbfgs": "SSBFGS_AB",
+            }.get(qn_variant, "SSBroyden2")
+            self.quasi_newton = SSBroydenUrbanOptimizer(
+                self.model.parameters(),
+                variant=urban_variant,
+                c1=qn_wolfe_c1, c2=qn_wolfe_c2, max_ls=qn_wolfe_max_ls,
+                initial_scale=qn_initial_scale,
+                tau_min=1e-12, tau_max=None, damping=1e-30,
+                dtype=torch.float64,
+                H_device="cpu" if qn_H_on_cpu else None,
+            )
+        else:
+            raise ValueError(
+                "qn_engine must be 'inhouse' or 'urban', got %r" % (qn_engine,)
+            )
 
         self.obj_train: list[float] = []
         self.obj_val: list[float] = []
@@ -375,6 +403,28 @@ class PINN_Helmholtz_Solver:
     def _qn_step(self, xy_train: torch.Tensor) -> tuple[float, float]:
         holder: dict = {}
 
+        if self.qn_engine == "urban":
+            def loss_and_grad(x_vec):
+                with torch.no_grad():
+                    offset = 0
+                    for p in self.model.parameters():
+                        numel = p.numel()
+                        p.copy_(x_vec[offset:offset + numel].to(p.dtype).view_as(p))
+                        offset += numel
+                for p in self.model.parameters():
+                    if p.grad is not None:
+                        p.grad.zero_()
+                J_obj_c, J_raw_c = self.compute_loss(xy_train, create_graph_second=True)
+                J_obj_c.backward()
+                grads = torch.cat([
+                    (p.grad if p.grad is not None else torch.zeros_like(p)).detach().view(-1)
+                    for p in self.model.parameters()
+                ])
+                holder["J_raw"] = J_raw_c
+                return J_obj_c.detach(), grads
+            J_obj = self.quasi_newton.step(loss_and_grad)
+            return float(J_obj.item()), float(holder["J_raw"].item())
+
         def closure():
             self.quasi_newton.zero_grad()
             J_obj_c, J_raw_c = self.compute_loss(xy_train, create_graph_second=True)
@@ -404,9 +454,21 @@ class PINN_Helmholtz_Solver:
         self.model.load_state_dict(
             {k: v.to(device) for k, v in snap["model"].items()}
         )
-        self.quasi_newton.H = (
-            snap["H"].clone() if snap["H"] is not None else None
-        )
+        H_saved = snap["H"]
+        if self.qn_engine == "urban":
+            # The urban optimiser symmetrises / Cholesky-checks on restore; a
+            # direct .H assignment would bypass that PD guard. Fall back to a
+            # fresh identity when there is nothing to restore.
+            if H_saved is not None:
+                self.quasi_newton.warm_start_from(
+                    H_saved.clone(), cholesky_check=True
+                )
+            else:
+                self.quasi_newton.H = None
+        else:
+            self.quasi_newton.H = (
+                H_saved.clone() if H_saved is not None else None
+            )
 
     # ---- Phase B trial scan: run K QN steps for each candidate lambda
     #      from a saved snapshot, pick the one with the lowest trailing
@@ -669,9 +731,12 @@ class PINN_Helmholtz_Solver:
         # iteration (the search interpolates/extrapolates from there, as in
         # scipy's BFGS); a plateau scheduler shrinking the QN lr would
         # permanently cap it, so no QN scheduler in that mode.
+        # The urban engine has no per-group 'lr', so a plateau scheduler on it
+        # would KeyError; and under strong Wolfe the unit trial step must be
+        # re-offered every iteration, so a QN scheduler is wrong there too.
         sch_qn = (
             None
-            if self.qn_line_search == "strong_wolfe"
+            if (self.qn_engine == "urban" or self.qn_line_search == "strong_wolfe")
             else make_plateau(self.quasi_newton)
         )
 
@@ -806,6 +871,13 @@ class PINN_Helmholtz_Solver:
                                 sq += float((p.grad ** 2).sum().item())
                         grad_norm = float(sq ** 0.5)
                 opt.step()
+            elif self.qn_engine == "urban":
+                # Urban optimiser uses the loss_and_grad interface; route the
+                # main-loop QN step through _qn_step, which already branches on
+                # self.qn_engine. The inhouse closure path below is unchanged.
+                j_obj_v, j_raw_v = self._qn_step(xy_train)
+                J_obj = torch.tensor(j_obj_v)
+                J_raw = torch.tensor(j_raw_v)
             else:
                 holder: dict = {}
 
@@ -1161,6 +1233,16 @@ HELMHOLTZ_CONFIGS: dict[str, dict] = {
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--engine",
+        choices=["inhouse", "urban"],
+        default="inhouse",
+        help="quasi-Newton engine for the refinement phase: in-house "
+        "float32 Armijo SSBroyden (default) or Urban float64 strong-Wolfe.",
+    )
+    args = parser.parse_args()
+
     # --- user knobs reproducing the paper's optimizer/loss sweeps ---
     config_name = "low"          # "low" | "high"
     qn_variant = "ssbroyden"     # "bfgs", "ssbfgs", "ssbroyden"
@@ -1196,6 +1278,7 @@ def main() -> None:
         loss_lambda=loss_lambda,
         qn_variant=qn_variant,
         qn_H_on_cpu=qn_H_on_cpu,
+        qn_engine=args.engine,
     )
 
     pinn.train(
@@ -1225,8 +1308,11 @@ def main() -> None:
             f"boxcox_phaseAB_init{lambda_phase_b_init:g}"
             f"_K{lambda_block_size}_d{lambda_step:g}"
         )
+    # Insert an "urban" token for the Urban engine so its runs land in a
+    # distinct directory and never overwrite the in-house ssbroyden runs.
+    engine_tag = "_urban" if args.engine == "urban" else ""
     run_name = (
-        f"helmholtz_{config_name}_{qn_variant}_{transform_tag}_{run_tag}"
+        f"helmholtz_{config_name}_{qn_variant}{engine_tag}_{transform_tag}_{run_tag}"
     )
     run_dir = os.path.join("..", "results", run_name)
     os.makedirs(run_dir, exist_ok=True)
@@ -1238,7 +1324,11 @@ def main() -> None:
     pinn.save_results(
         run_dir,
         n_eval=80,
-        extra_metadata={"run_name": run_name, "run_tag": run_tag},
+        extra_metadata={
+            "run_name": run_name,
+            "run_tag": run_tag,
+            "qn_engine": args.engine,
+        },
     )
     print(f"\nAll run artefacts written to: {os.path.abspath(run_dir)}")
 

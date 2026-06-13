@@ -89,6 +89,7 @@ def run_one(
     plateau_min_delta: float,
     patience: int,
     es_patience: int,
+    qn_engine: str = "inhouse",
 ) -> SeedResult:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -104,6 +105,7 @@ def run_one(
         loss_lambda=lam,
         qn_variant=qn_variant,
         qn_line_search=qn_line_search,
+        qn_engine=qn_engine,
         adam_beta1=adam_beta1,
         adam_eps=adam_eps,
     )
@@ -155,6 +157,7 @@ def run_sweep(
     plateau_min_delta: float,
     patience: int,
     es_patience: int,
+    qn_engine: str = "inhouse",
 ) -> tuple[LambdaResult, ...]:
     out: list[LambdaResult] = []
     for lam in lambdas:
@@ -173,6 +176,7 @@ def run_sweep(
                 hidden=hidden, lr=lr,
                 qn_variant=qn_variant,
                 qn_line_search=qn_line_search,
+                qn_engine=qn_engine,
                 adam_schedule=adam_schedule,
                 adam_beta1=adam_beta1,
                 adam_eps=adam_eps,
@@ -395,6 +399,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "SSBroyden engages. Set --patience >= --epochs to disable.",
     )
     p.add_argument("--results-dir", type=str, default=os.path.join("..", "results"))
+    p.add_argument(
+        "--engine", choices=["inhouse", "urban"], default="inhouse",
+        help="Quasi-Newton engine: 'inhouse' (float32 + Armijo, legacy) or "
+        "'urban' (float64 dense Hessian + strong-Wolfe line search).",
+    )
     return p.parse_args(argv)
 
 
@@ -410,7 +419,9 @@ def main(argv: list[str] | None = None) -> None:
     seeds = tuple(args.seeds)
     run_tag = time.strftime("%Y%m%d_%H%M%S")
     qn_tag = args.qn_variant
-    if args.qn_line_search == "strong_wolfe":
+    if args.engine == "urban":
+        qn_tag += "urban"
+    elif args.qn_line_search == "strong_wolfe":
         qn_tag += "wolfe"
     out_dir = os.path.join(
         args.results_dir,
@@ -435,6 +446,7 @@ def main(argv: list[str] | None = None) -> None:
         hidden=tuple(args.hidden), lr=args.lr,
         qn_variant=args.qn_variant,
         qn_line_search=args.qn_line_search,
+        qn_engine=args.engine,
         adam_schedule=args.adam_schedule,
         adam_beta1=args.adam_beta1,
         adam_eps=args.adam_eps,

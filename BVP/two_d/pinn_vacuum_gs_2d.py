@@ -55,6 +55,7 @@ _OPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "optim
 if _OPT_DIR not in sys.path:
     sys.path.insert(0, _OPT_DIR)
 from ssbroyden import SSBroydenOptimizer  # noqa: E402
+from ssbroyden_urban import SSBroydenUrbanOptimizer  # noqa: E402
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -117,25 +118,50 @@ class VacuumGSPINN:
         loss_lambda: float = 1.0,
         loss_eps: float = 1e-12,
         qn_variant: str = "ssbroyden",
+        qn_engine: str = "inhouse",
+        qn_wolfe_c1: float = 1e-4,
+        qn_wolfe_c2: float = 0.9,
+        qn_wolfe_max_ls: int = 25,
+        qn_initial_scale: bool = False,
     ) -> None:
         self.model = model.to(device)
         self.loss_transform = str(loss_transform)
         self.loss_lambda = float(loss_lambda)
         self.loss_eps = float(loss_eps)
+        self.qn_engine = str(qn_engine)
         self.adam = optim.Adam(self.model.parameters(), lr=lr)
-        self.qn = SSBroydenOptimizer(
-            self.model.parameters(),
-            variant=qn_variant,
-            lr=1.0,
-            line_search=True,
-            c1=1e-4,
-            backtrack=0.5,
-            max_ls=20,
-            damping=1e-12,
-            tau_min=1e-6,
-            tau_max=1.0,
-            reset_on_fail=True,
-        )
+        if self.qn_engine == "inhouse":
+            self.qn = SSBroydenOptimizer(
+                self.model.parameters(),
+                variant=qn_variant,
+                lr=1.0,
+                line_search=True,
+                c1=1e-4,
+                backtrack=0.5,
+                max_ls=20,
+                damping=1e-12,
+                tau_min=1e-6,
+                tau_max=1.0,
+                reset_on_fail=True,
+            )
+        elif self.qn_engine == "urban":
+            urban_variant = {
+                "ssbroyden": "SSBroyden2",
+                "bfgs": "BFGS",
+                "ssbfgs": "SSBFGS_AB",
+            }.get(qn_variant, "SSBroyden2")
+            self.qn = SSBroydenUrbanOptimizer(
+                self.model.parameters(),
+                variant=urban_variant,
+                c1=qn_wolfe_c1, c2=qn_wolfe_c2, max_ls=qn_wolfe_max_ls,
+                initial_scale=qn_initial_scale,
+                tau_min=1e-12, tau_max=None, damping=1e-30,
+                dtype=torch.float64,
+            )
+        else:
+            raise ValueError(
+                "qn_engine must be 'inhouse' or 'urban', got %r" % (qn_engine,)
+            )
 
         self.J_train: list[float] = []
         self.J_val: list[float] = []
@@ -311,21 +337,46 @@ class VacuumGSPINN:
             else:
                 holder: dict = {}
 
-                def closure():
-                    self.qn.zero_grad()
-                    J_obj_c, J_raw_c = self.compute_loss(
-                        x_train, create_graph_second=True
-                    )
-                    holder["J_raw"] = J_raw_c
-                    J_obj_c.backward()
-                    return J_obj_c
+                if self.qn_engine == "urban":
+                    def loss_and_grad(x_vec):
+                        with torch.no_grad():
+                            offset = 0
+                            for p in self.model.parameters():
+                                numel = p.numel()
+                                p.copy_(x_vec[offset:offset + numel].to(p.dtype).view_as(p))
+                                offset += numel
+                        for p in self.model.parameters():
+                            if p.grad is not None:
+                                p.grad.zero_()
+                        J_obj_c, J_raw_c = self.compute_loss(
+                            x_train, create_graph_second=True
+                        )
+                        J_obj_c.backward()
+                        grads = torch.cat([
+                            (p.grad if p.grad is not None else torch.zeros_like(p)).detach().view(-1)
+                            for p in self.model.parameters()
+                        ])
+                        holder["J_raw"] = J_raw_c
+                        return J_obj_c.detach(), grads
 
-                def loss_eval():
-                    J_obj_e, _ = self.compute_loss(x_train, create_graph_second=False)
-                    return J_obj_e
+                    J_obj = self.qn.step(loss_and_grad)
+                    J_raw = holder["J_raw"]
+                else:
+                    def closure():
+                        self.qn.zero_grad()
+                        J_obj_c, J_raw_c = self.compute_loss(
+                            x_train, create_graph_second=True
+                        )
+                        holder["J_raw"] = J_raw_c
+                        J_obj_c.backward()
+                        return J_obj_c
 
-                J_obj = self.qn.step(closure, loss_eval)
-                J_raw = holder["J_raw"]
+                    def loss_eval():
+                        J_obj_e, _ = self.compute_loss(x_train, create_graph_second=False)
+                        return J_obj_e
+
+                    J_obj = self.qn.step(closure, loss_eval)
+                    J_raw = holder["J_raw"]
 
             with torch.set_grad_enabled(True):
                 _, val_raw = self.compute_loss(x_val, create_graph_second=False)
@@ -454,6 +505,7 @@ def run_seeds(
     hidden: tuple[int, ...],
     lr: float,
     qn_variant: str,
+    qn_engine: str,
     loss_transform: str,
     loss_lambda: float,
     handover_strategy: str,
@@ -477,6 +529,7 @@ def run_seeds(
             loss_transform=loss_transform,
             loss_lambda=loss_lambda,
             qn_variant=qn_variant,
+            qn_engine=qn_engine,
         )
         print(
             f"\n[seed={seed}] training vacuum Grad-Shafranov PINN  "
@@ -604,6 +657,7 @@ def write_summary(
     n_epochs: int,
     adam_epochs: int,
     seeds: tuple[int, ...],
+    qn_engine: str = "inhouse",
 ) -> None:
     means = {
         "final_J_val_mean": float(np.mean([r.final_J_val for r in results])),
@@ -616,6 +670,7 @@ def write_summary(
     payload = {
         "problem": f"Vacuum Grad-Shafranov psi=R^2 on [{R_LO},{R_HI}]x[{Z_LO},{Z_HI}]",
         "qn_variant": qn_variant,
+        "qn_engine": qn_engine,
         "n_epochs": n_epochs,
         "adam_epochs": adam_epochs,
         "seeds": list(seeds),
@@ -633,6 +688,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Vacuum Grad-Shafranov PINN validation (multi-seed).")
     p.add_argument("--qn-variant", type=str, default="ssbroyden",
                    choices=["bfgs", "ssbfgs", "ssbroyden"])
+    p.add_argument("--engine", type=str, default="inhouse",
+                   choices=["inhouse", "urban"],
+                   help="Quasi-Newton refinement engine: in-house float32 "
+                        "Armijo SSBroyden, or Urban float64 strong-Wolfe.")
     p.add_argument("--loss-transform", type=str, default="identity",
                    choices=["identity", "sqrt", "log", "boxcox"])
     p.add_argument("--loss-lambda", type=float, default=1.0)
@@ -661,9 +720,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     run_tag = time.strftime("%Y%m%d_%H%M%S")
+    engine_tag = "_urban" if args.engine == "urban" else ""
     out_dir = os.path.join(
         args.results_dir,
-        f"vacuum_gs_{args.qn_variant}_{args.loss_transform}_{run_tag}",
+        f"vacuum_gs_{args.qn_variant}{engine_tag}_{args.loss_transform}_{run_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -675,6 +735,7 @@ def main(argv: list[str] | None = None) -> None:
         hidden=tuple(args.hidden),
         lr=args.lr,
         qn_variant=args.qn_variant,
+        qn_engine=args.engine,
         loss_transform=args.loss_transform,
         loss_lambda=args.loss_lambda,
         handover_strategy=args.handover_strategy,
@@ -694,6 +755,7 @@ def main(argv: list[str] | None = None) -> None:
         n_epochs=args.epochs,
         adam_epochs=args.adam_epochs,
         seeds=tuple(args.seeds),
+        qn_engine=args.engine,
     )
 
     np.savez(

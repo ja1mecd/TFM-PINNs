@@ -170,6 +170,7 @@ def run_one(
     diag_grid_n: int,
     patience: int,
     ls: LineSearchConfig,
+    qn_engine: str = "inhouse",
 ) -> SeedResult:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -188,6 +189,7 @@ def run_one(
         loss_lambda=lam,
         qn_variant=qn_variant,
         qn_line_search=qn_line_search,
+        qn_engine=qn_engine,
         qn_c1=ls.c1,
         qn_c2=ls.c2,
         qn_backtrack=ls.backtrack,
@@ -246,6 +248,7 @@ def run_sweep(
     diag_grid_n: int,
     patience: int,
     ls: LineSearchConfig,
+    qn_engine: str = "inhouse",
 ) -> tuple[LambdaResult, ...]:
     out: list[LambdaResult] = []
     for lam in lambdas:
@@ -271,6 +274,7 @@ def run_sweep(
                 diag_grid_n=diag_grid_n,
                 patience=patience,
                 ls=ls,
+                qn_engine=qn_engine,
             ))
         out.append(LambdaResult(lambda_=lam, seeds=tuple(seed_runs)))
     return tuple(out)
@@ -676,6 +680,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--results-dir", type=str, default=os.path.join("..", "results"))
     p.add_argument(
+        "--engine", choices=["inhouse", "urban"], default="inhouse",
+        help="Quasi-Newton engine: 'inhouse' (float32 + Armijo, legacy) or "
+        "'urban' (float64 dense Hessian + strong-Wolfe line search).",
+    )
+    p.add_argument(
         "--success-rel-l2-threshold",
         type=float,
         default=SUCCESS_REL_L2_DEFAULT,
@@ -717,9 +726,10 @@ def main(argv: list[str] | None = None) -> None:
         reset_on_fail=args.reset_on_fail,
     )
     run_tag = time.strftime("%Y%m%d_%H%M%S")
+    engine_tag = "urban_" if args.engine == "urban" else ""
     out_dir = os.path.join(
         args.results_dir,
-        f"bvp1d_k{args.wavenumber:g}_boxcox_2darch_{args.qn_variant}"
+        f"bvp1d_k{args.wavenumber:g}_boxcox_2darch_{engine_tag}{args.qn_variant}"
         f"_ls-{ls.tag}_{run_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
@@ -751,6 +761,7 @@ def main(argv: list[str] | None = None) -> None:
         diag_grid_n=args.diag_grid_n,
         patience=args.patience,
         ls=ls,
+        qn_engine=args.engine,
     )
 
     write_summary(

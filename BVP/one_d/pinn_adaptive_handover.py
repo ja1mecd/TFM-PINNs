@@ -164,7 +164,10 @@ class PINN_BVP_AdaptiveHandover(PINN_BVP_SSBroyden):
             )
 
         sch_adam = make_plateau(self.adam)
-        sch_qn = make_plateau(self.quasi_newton)
+        # The urban QN engine has no per-group 'lr', so a plateau scheduler on
+        # it would KeyError; the strong-Wolfe search re-offers the unit step
+        # every iteration anyway, so no QN scheduler is attached in that regime.
+        sch_qn = None if self.qn_engine == "urban" else make_plateau(self.quasi_newton)
 
         # Plateau detector for handover (separate from the early-stop
         # detector below — different patience/min_delta).
@@ -232,6 +235,30 @@ class PINN_BVP_AdaptiveHandover(PINN_BVP_SSBroyden):
                             sq += float((p.grad ** 2).sum().item())
                     grad_norm = float(sq ** 0.5)
                 opt.step()
+            elif self.qn_engine == "urban":
+                holder: dict = {}
+
+                def loss_and_grad(x_vec):
+                    with torch.no_grad():
+                        offset = 0
+                        for p in self.model.parameters():
+                            numel = p.numel()
+                            p.copy_(x_vec[offset:offset + numel].to(p.dtype).view_as(p))
+                            offset += numel
+                    for p in self.model.parameters():
+                        if p.grad is not None:
+                            p.grad.zero_()
+                    J_obj_c, J_raw_c = self.compute_loss(x_train, create_graph_second=True)
+                    J_obj_c.backward()
+                    grads = torch.cat([
+                        (p.grad if p.grad is not None else torch.zeros_like(p)).detach().view(-1)
+                        for p in self.model.parameters()
+                    ])
+                    holder["J_raw"] = J_raw_c
+                    return J_obj_c.detach(), grads
+
+                J_obj = opt.step(loss_and_grad)
+                J_raw = holder["J_raw"]
             else:
                 holder: dict = {}
 
@@ -276,7 +303,8 @@ class PINN_BVP_AdaptiveHandover(PINN_BVP_SSBroyden):
             else:
                 epochs_no_improve += 1
 
-            sch.step(float(val_obj.item()))
+            if sch is not None:
+                sch.step(float(val_obj.item()))
 
             # Diagnostics are computed EVERY epoch (printing stays throttled by
             # verbose_freq below). The previous every-verbose_freq sampling
@@ -289,7 +317,7 @@ class PINN_BVP_AdaptiveHandover(PINN_BVP_SSBroyden):
             self.sol_rel_l2.append(last_rel)
 
             if epoch == 1 or (epoch % verbose_freq == 0):
-                lr_now = opt.param_groups[0]["lr"]
+                lr_now = opt.param_groups[0].get("lr", float("nan"))
                 phase = "ADAM" if use_adam else self.quasi_newton.param_groups[0][
                     "variant"
                 ].upper()

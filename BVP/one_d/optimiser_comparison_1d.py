@@ -145,6 +145,7 @@ def run_pipeline_once(
     es_window: int = 20,
     es_min_delta: float = 1e-4,
     es_stop_loss: float = 0.0,
+    qn_engine: str = "inhouse",
 ) -> SeedRun:
     if pipeline not in PIPELINES:
         raise ValueError(f"unknown pipeline {pipeline!r}; valid: {PIPELINES}")
@@ -164,6 +165,7 @@ def run_pipeline_once(
             model=model, k=k, lr=lr,
             loss_transform="identity",
             qn_variant="ssbroyden",  # never reached
+            qn_engine=qn_engine,
         )
         pinn.train(
             n_epochs=total_epochs,
@@ -187,6 +189,7 @@ def run_pipeline_once(
             model=model, k=k, lr=lr,
             loss_transform="identity",
             qn_variant=qn,
+            qn_engine=qn_engine,
         )
         pinn.train(
             n_epochs=total_epochs,
@@ -243,6 +246,7 @@ def run_comparison(
     es_window: int = 20,
     es_min_delta: float = 1e-4,
     es_stop_loss: float = 0.0,
+    qn_engine: str = "inhouse",
 ) -> tuple[PipelineResult, ...]:
     results: list[PipelineResult] = []
     for p in pipelines:
@@ -268,6 +272,7 @@ def run_comparison(
                 es_window=es_window,
                 es_min_delta=es_min_delta,
                 es_stop_loss=es_stop_loss,
+                qn_engine=qn_engine,
             )
             runs.append(run)
         results.append(PipelineResult(pipeline=p, seeds=tuple(runs)))
@@ -642,6 +647,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument(
+        "--engine", choices=["inhouse", "urban"], default="inhouse",
+        help="Quasi-Newton engine: 'inhouse' (float32 + Armijo, legacy) or "
+        "'urban' (float64 dense Hessian + strong-Wolfe line search).",
+    )
+    p.add_argument(
         "--results-dir",
         type=str,
         default=os.path.join("..", "results"),
@@ -663,9 +673,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     run_tag = time.strftime("%Y%m%d_%H%M%S")
+    engine_tag = "_urban" if args.engine == "urban" else ""
     out_dir = os.path.join(
         args.results_dir,
-        f"bvp1d_k{args.wavenumber:g}_optim_compare_{run_tag}",
+        f"bvp1d_k{args.wavenumber:g}_optim_compare{engine_tag}_{run_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -699,6 +710,7 @@ def main(argv: list[str] | None = None) -> None:
         es_window=args.es_window,
         es_min_delta=args.es_min_delta,
         es_stop_loss=args.es_stop_loss,
+        qn_engine=args.engine,
     )
 
     write_summary(
