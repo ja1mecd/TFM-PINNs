@@ -92,6 +92,7 @@ def run_one(
     es_min_delta: float,
     es_window: int,
     es_stop_loss: float,
+    qn_backend: str = "urban",
 ) -> SeedResult:
     # Seed before model construction so weight init is reproducible per seed;
     # train() re-seeds the data sampling with the same value internally.
@@ -109,6 +110,7 @@ def run_one(
         loss_lambda=lam,
         initial_scale=initial_scale,
         H_on_cpu=h_on_cpu,
+        qn_backend=qn_backend,
     )
     pinn.train(
         n_epochs=n_epochs,
@@ -161,6 +163,7 @@ def run_sweep(
     es_min_delta: float,
     es_window: int,
     es_stop_loss: float,
+    qn_backend: str = "urban",
 ) -> tuple[LambdaResult, ...]:
     out: list[LambdaResult] = []
     for lam in lambdas:
@@ -185,6 +188,7 @@ def run_sweep(
                 es_min_delta=es_min_delta,
                 es_window=es_window,
                 es_stop_loss=es_stop_loss,
+                qn_backend=qn_backend,
             ))
         out.append(LambdaResult(lambda_=lam, seeds=tuple(seed_runs)))
     return tuple(out)
@@ -279,12 +283,18 @@ def write_summary(
     adam_epochs: int,
     seeds: tuple[int, ...],
     hidden: tuple[int, ...] = (),
+    qn_backend: str = "urban",
 ) -> None:
     arch = "x".join(str(h) for h in hidden) if hidden else "?"
+    backend_note = (
+        "inhouse (float32, Armijo)" if qn_backend == "inhouse"
+        else "urban (float64, strong-Wolfe)"
+    )
     lines: list[str] = []
     lines.append(
         f"CFGS (current-free Grad-Shafranov) Box-Cox sweep, "
-        f"net={arch}, variant={variant}, epochs={n_epochs} (adam={adam_epochs}), "
+        f"net={arch}, variant={variant}, qn_backend={backend_note}, "
+        f"epochs={n_epochs} (adam={adam_epochs}), "
         f"seeds={list(seeds)}\n\n"
     )
     lines.append(
@@ -355,6 +365,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--H-on-cpu", action="store_true")
     p.add_argument(
+        "--qn-backend",
+        type=str,
+        default="urban",
+        choices=["urban", "inhouse"],
+        help="Quasi-Newton backend. 'urban' is the float64 strong-Wolfe "
+             "ssbroyden_urban optimiser behind the reported CFGS results. "
+             "'inhouse' uses the float32 Armijo ssbroyden.py optimiser, "
+             "matching the Helmholtz/Poisson stack for an apples-to-apples "
+             "cross-regime comparison.",
+    )
+    p.add_argument(
         "--no-early-stop", dest="early_stop", action="store_false",
         help="Disable QN-phase early stopping (run the full fixed budget). "
              "Early stopping is ON by default to keep the sweep tractable.",
@@ -393,7 +414,7 @@ def main(argv: list[str] | None = None) -> None:
     run_tag = time.strftime("%Y%m%d_%H%M%S")
     out_dir = os.path.join(
         args.results_dir,
-        f"cfgs_urban_{args.variant}_boxcox_finesweep_{run_tag}",
+        f"cfgs_{args.qn_backend}_{args.variant}_boxcox_finesweep_{run_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -423,6 +444,7 @@ def main(argv: list[str] | None = None) -> None:
         es_min_delta=args.es_min_delta,
         es_window=args.es_window,
         es_stop_loss=args.es_stop_loss,
+        qn_backend=args.qn_backend,
     )
 
     write_summary(
@@ -432,6 +454,7 @@ def main(argv: list[str] | None = None) -> None:
         n_epochs=args.epochs, adam_epochs=args.adam_epochs,
         seeds=seeds,
         hidden=tuple(args.hidden),
+        qn_backend=args.qn_backend,
     )
     plot_sweep(
         results=results,

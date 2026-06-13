@@ -49,6 +49,7 @@ _OPT_DIR = os.path.join(
 if _OPT_DIR not in sys.path:
     sys.path.insert(0, _OPT_DIR)
 from ssbroyden_urban import SSBroydenUrbanOptimizer  # noqa: E402
+from ssbroyden import SSBroydenOptimizer  # noqa: E402
 
 # Re-use problem definition from the existing 2D script so the only
 # difference between the two pipelines is the QN phase.
@@ -128,6 +129,7 @@ class PINN_CFGS_Solver_Urban:
         initial_scale: bool = False,
         H_dtype: torch.dtype = torch.float64,
         H_on_cpu: bool = False,
+        qn_backend: str = "urban",
     ) -> None:
         self.model = model.to(device)
         self.lambda_pde = float(lambda_pde)
@@ -137,20 +139,55 @@ class PINN_CFGS_Solver_Urban:
         self.loss_eps = float(loss_eps)
         self.rel_err_eps = float(rel_err_eps)
 
+        self.qn_backend = str(qn_backend)
         self.adam = optim.Adam(self.model.parameters(), lr=lr_adam)
-        self.qn = SSBroydenUrbanOptimizer(
-            self.model.parameters(),
-            variant=variant,
-            c1=wolfe_c1,
-            c2=wolfe_c2,
-            max_ls=wolfe_max_ls,
-            initial_scale=initial_scale,
-            tau_min=1e-12,
-            tau_max=None,
-            damping=1e-30,
-            dtype=H_dtype,
-            H_device="cpu" if H_on_cpu else None,
-        )
+        if self.qn_backend == "inhouse":
+            # Match the Helmholtz/Poisson stack exactly so the cross-regime
+            # comparison is clean. In-house dense SSBroyden in single
+            # precision (H inherits the float32 model dtype), Armijo
+            # backtracking, identity reset on curvature failure. The only
+            # change from the "urban" backend is the quasi-Newton core, which
+            # there is float64 with a strong-Wolfe line search.
+            inhouse_variant = {
+                "SSBroyden1": "ssbroyden",
+                "SSBroyden2": "ssbroyden",
+                "SSBroyden3": "ssbroyden",
+                "BFGS": "bfgs",
+                "SSBFGS_AB": "ssbfgs",
+                "SSBFGS_OL": "ssbfgs",
+            }.get(variant, "ssbroyden")
+            self.qn = SSBroydenOptimizer(
+                self.model.parameters(),
+                variant=inhouse_variant,
+                lr=1.0,
+                line_search="armijo",
+                c1=1e-4,
+                backtrack=0.5,
+                max_ls=20,
+                damping=1e-12,
+                tau_min=1e-6,
+                tau_max=1.0,
+                reset_on_fail=True,
+                H_on_cpu=H_on_cpu,
+            )
+        elif self.qn_backend == "urban":
+            self.qn = SSBroydenUrbanOptimizer(
+                self.model.parameters(),
+                variant=variant,
+                c1=wolfe_c1,
+                c2=wolfe_c2,
+                max_ls=wolfe_max_ls,
+                initial_scale=initial_scale,
+                tau_min=1e-12,
+                tau_max=None,
+                damping=1e-30,
+                dtype=H_dtype,
+                H_device="cpu" if H_on_cpu else None,
+            )
+        else:
+            raise ValueError(
+                f"qn_backend must be 'urban' or 'inhouse', got {qn_backend!r}"
+            )
 
         # Logs
         self.obj_train: list[float] = []
@@ -276,6 +313,27 @@ class PINN_CFGS_Solver_Urban:
 
     def _qn_step(self, qmu_train: torch.Tensor) -> tuple[float, float, float]:
         latest_raw = {"value": float("nan")}
+
+        if self.qn_backend == "inhouse":
+            # Closure / loss-eval interface of the in-house SSBroydenOptimizer,
+            # identical to the Helmholtz solver. The optimiser mutates the
+            # parameters internally, so the closure only forwards, backprops
+            # and returns the transformed objective.
+            def closure():
+                self.qn.zero_grad()
+                J_obj, J_raw = self.compute_loss(qmu_train, transform=True)
+                latest_raw["value"] = float(J_raw.item())
+                J_obj.backward()
+                return J_obj
+
+            def loss_eval():
+                J_obj, _ = self.compute_loss(
+                    qmu_train, transform=True, create_graph_second=False
+                )
+                return J_obj
+
+            J_obj_t = self.qn.step(closure, loss_eval)
+            return float(J_obj_t.item()), latest_raw["value"], float("nan")
 
         def loss_and_grad(x_vec: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             with torch.no_grad():
@@ -427,9 +485,13 @@ class PINN_CFGS_Solver_Urban:
         for epoch in range(adam_epochs + 1, n_epochs + 1):
             qn_iter = epoch - adam_epochs
             if qn_iter != 1 and ((qn_iter - 1) % rad_resample_every == 0):
-                H = self.qn.H
-                if H is not None:
-                    self.qn.warm_start_from(H, cholesky_check=True)
+                if self.qn_backend == "urban":
+                    H = self.qn.H
+                    if H is not None:
+                        self.qn.warm_start_from(H, cholesky_check=True)
+                # inhouse: the optimiser keeps self.qn.H across steps, so the
+                # warm start is automatic and matches the Helmholtz solver,
+                # which also leaves H untouched at a resample.
                 qmu_train = self._rad_resample(rad_pool_size, n_train, rad_k1, rad_k2)
                 qmu_val = self._rad_resample(
                     rad_pool_size, n_collocation - n_train, rad_k1, rad_k2
@@ -459,16 +521,25 @@ class PINN_CFGS_Solver_Urban:
             self.sol_rel_l2.append(last_sol_rel_l2)
 
             if epoch % verbose_freq == 0 or epoch == n_epochs:
-                d = self.qn.diagnostics()
-                print(
-                    f"[QN/{self.qn.param_groups[0]['variant']}] "
-                    f"epoch {epoch:6d} ({qn_iter}/{qn_total}) | "
-                    f"J_raw={J_raw:.4e} J_val={float(J_val_raw.item()):.4e} | "
-                    f"alpha={alpha:.2e} tau={d['last_tau']:.2e} | "
-                    f"PDE_L2={self.pde_l2[-1]:.4e} SOL_L2={self.sol_l2[-1]:.4e} "
-                    f"REL={self.sol_rel_l2[-1]:.3e} | "
-                    f"resets={d['n_resets']} ls_fail={d['n_ls_failures']}"
-                )
+                if self.qn_backend == "urban":
+                    d = self.qn.diagnostics()
+                    print(
+                        f"[QN/{self.qn.param_groups[0]['variant']}] "
+                        f"epoch {epoch:6d} ({qn_iter}/{qn_total}) | "
+                        f"J_raw={J_raw:.4e} J_val={float(J_val_raw.item()):.4e} | "
+                        f"alpha={alpha:.2e} tau={d['last_tau']:.2e} | "
+                        f"PDE_L2={self.pde_l2[-1]:.4e} SOL_L2={self.sol_l2[-1]:.4e} "
+                        f"REL={self.sol_rel_l2[-1]:.3e} | "
+                        f"resets={d['n_resets']} ls_fail={d['n_ls_failures']}"
+                    )
+                else:
+                    print(
+                        f"[QN/{self.qn.param_groups[0]['variant']}/inhouse] "
+                        f"epoch {epoch:6d} ({qn_iter}/{qn_total}) | "
+                        f"J_raw={J_raw:.4e} J_val={float(J_val_raw.item()):.4e} | "
+                        f"PDE_L2={self.pde_l2[-1]:.4e} SOL_L2={self.sol_l2[-1]:.4e} "
+                        f"REL={self.sol_rel_l2[-1]:.3e}"
+                    )
 
             if early_stop:
                 jv = self.J_val[-1]
@@ -509,13 +580,13 @@ class PINN_CFGS_Solver_Urban:
                 f"Early stopped after {es_stopped_at - adam_epochs} of "
                 f"{qn_total} QN steps (saved {n_epochs - es_stopped_at} steps)."
             )
-        d = self.qn.diagnostics()
         print(
             f"Final: J_raw={self.J_train[-1]:.4e}, J_val={self.J_val[-1]:.4e}, "
             f"PDE_L2={self.pde_l2[-1]:.4e}, SOL_L2={self.sol_l2[-1]:.4e}, "
             f"REL={self.sol_rel_l2[-1]:.3e}"
         )
-        print(f"QN diagnostics: {d}")
+        if self.qn_backend == "urban":
+            print(f"QN diagnostics: {self.qn.diagnostics()}")
 
     # ----- post-processing -----
     def plot_results(self, n: int = 80, save_path: str | None = None, dpi: int = 150) -> None:
@@ -600,7 +671,10 @@ class PINN_CFGS_Solver_Urban:
             "loss_transform": self.loss_transform,
             "loss_lambda": self.loss_lambda,
             "variant": self.qn.param_groups[0]["variant"],
-            "qn_diagnostics": self.qn.diagnostics(),
+            "qn_backend": self.qn_backend,
+            "qn_diagnostics": (
+                self.qn.diagnostics() if self.qn_backend == "urban" else None
+            ),
             "final_J_train": (self.J_train[-1] if self.J_train else None),
             "final_J_val": (self.J_val[-1] if self.J_val else None),
             "final_pde_l2": (self.pde_l2[-1] if self.pde_l2 else None),
