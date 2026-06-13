@@ -89,6 +89,37 @@ class SeedResult:
 SUCCESS_REL_L2_DEFAULT: float = 1.0
 
 
+@dataclass(frozen=True)
+class LineSearchConfig:
+    """Quasi-Newton line-search regime for one sweep.
+
+    The default reproduces the historical Armijo + H-reset stack, so an
+    unconfigured sweep is identical to every previous 1D Box-Cox run. The
+    ablation drives this from `strong_wolfe` (Urban-faithful, baseline never
+    starves) down to `none` (fixed unit step, baseline stalls) to test whether
+    the log/sqrt transforms only overtake identity once the optimiser is
+    crippled enough that the untransformed baseline stops converging.
+    """
+
+    line_search: str = "armijo"
+    max_ls: int = 20
+    backtrack: float = 0.5
+    c1: float = 1e-4
+    c2: float = 0.9
+    reset_on_fail: bool = True
+
+    @property
+    def tag(self) -> str:
+        parts = [self.line_search]
+        if self.max_ls != 20:
+            parts.append(f"maxls{self.max_ls}")
+        if self.backtrack != 0.5:
+            parts.append(f"bt{self.backtrack:g}")
+        if not self.reset_on_fail:
+            parts.append("noreset")
+        return "-".join(parts)
+
+
 def is_successful(s: SeedResult, rel_l2_threshold: float) -> bool:
     """True iff the final iterate beats the configured rel. L^2 threshold."""
     return bool(np.isfinite(s.final_sol_rel_l2)) and (
@@ -138,6 +169,7 @@ def run_one(
     plateau_min_delta: float,
     diag_grid_n: int,
     patience: int,
+    ls: LineSearchConfig,
 ) -> SeedResult:
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -145,6 +177,9 @@ def run_one(
         torch.cuda.manual_seed_all(seed)
 
     model = NeuralNetwork(hidden_layers=tuple(hidden), activation=nn.Tanh())
+    # The optimiser wants a bool for "no line search"; the CLI/tag carries the
+    # human-readable "none".
+    qn_line_search = False if ls.line_search == "none" else ls.line_search
     pinn = PINN_BVP_AdaptiveHandover(
         model=model,
         k=k,
@@ -152,6 +187,12 @@ def run_one(
         loss_transform="boxcox",
         loss_lambda=lam,
         qn_variant=qn_variant,
+        qn_line_search=qn_line_search,
+        qn_c1=ls.c1,
+        qn_c2=ls.c2,
+        qn_backtrack=ls.backtrack,
+        qn_max_ls=ls.max_ls,
+        qn_reset_on_fail=ls.reset_on_fail,
     )
     pinn.train(
         n_epochs=n_epochs,
@@ -204,6 +245,7 @@ def run_sweep(
     plateau_min_delta: float,
     diag_grid_n: int,
     patience: int,
+    ls: LineSearchConfig,
 ) -> tuple[LambdaResult, ...]:
     out: list[LambdaResult] = []
     for lam in lambdas:
@@ -211,7 +253,8 @@ def run_sweep(
         for s in seeds:
             print(
                 f"\n[1D(2D-arch) lambda={lam:g}, seed={s}]  "
-                f"handover={handover_strategy}, qn_patience={patience}"
+                f"handover={handover_strategy}, qn_patience={patience}, "
+                f"ls={ls.tag}"
             )
             seed_runs.append(run_one(
                 lam=lam, seed=s, k=k,
@@ -227,6 +270,7 @@ def run_sweep(
                 plateau_min_delta=plateau_min_delta,
                 diag_grid_n=diag_grid_n,
                 patience=patience,
+                ls=ls,
             ))
         out.append(LambdaResult(lambda_=lam, seeds=tuple(seed_runs)))
     return tuple(out)
@@ -463,12 +507,14 @@ def write_summary(
     n_collocation: int,
     seeds: tuple[int, ...],
     rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
+    line_search_tag: str = "armijo",
 ) -> None:
     arch = "x".join(str(h) for h in hidden)
     lines: list[str] = []
     lines.append(
         f"1D BVP Box-Cox sweep (2D protocol), k={k:g}, net={arch}, "
         f"n_collocation={n_collocation}, qn={qn_variant}, "
+        f"line_search={line_search_tag}, "
         f"epochs={n_epochs} (adam={adam_epochs}), seeds={list(seeds)}\n"
     )
     lines.append(
@@ -561,6 +607,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="ssbroyden",
         choices=["bfgs", "ssbfgs", "ssbroyden"],
     )
+    # ---- quasi-Newton line-search ablation ----
+    # The whole point of this sweep variant: weaken the line search and watch
+    # whether log/sqrt (low lambda) overtake identity (lambda=1) once the
+    # untransformed baseline stops converging.
+    p.add_argument(
+        "--line-search",
+        type=str,
+        default="armijo",
+        choices=["strong_wolfe", "armijo", "none"],
+        help="QN line-search mode. 'strong_wolfe' = Urban-faithful (baseline "
+             "never starves); 'armijo' = the historical default; 'none' = "
+             "fixed unit step (most crippled).",
+    )
+    p.add_argument("--max-ls", type=int, default=20,
+                   help="Max backtracking steps (Armijo) / Wolfe bracketing "
+                        "evals. Lower = more crippled. Default 20.")
+    p.add_argument("--backtrack", type=float, default=0.5,
+                   help="Armijo backtracking factor. Default 0.5.")
+    p.add_argument("--c1", type=float, default=1e-4,
+                   help="Armijo / Wolfe sufficient-decrease constant.")
+    p.add_argument("--c2", type=float, default=0.9,
+                   help="Strong-Wolfe curvature constant (strong_wolfe only).")
+    p.add_argument(
+        "--no-reset-on-fail",
+        dest="reset_on_fail",
+        action="store_false",
+        help="Disable the H->identity reset after a failed curvature update. "
+             "Removes the safety net, so a crippled run actually stalls "
+             "instead of silently restarting from steepest descent.",
+    )
+    p.set_defaults(reset_on_fail=True)
     p.add_argument("--epochs", type=int, default=10000,
                    help="Total budget cap (2000 Adam + up to 8000 QN); QN-phase "
                         "early stopping ends most runs well before this.")
@@ -631,10 +708,19 @@ def main(argv: list[str] | None = None) -> None:
 
     seeds = tuple(args.seeds)
     hidden = tuple(args.hidden)
+    ls = LineSearchConfig(
+        line_search=args.line_search,
+        max_ls=args.max_ls,
+        backtrack=args.backtrack,
+        c1=args.c1,
+        c2=args.c2,
+        reset_on_fail=args.reset_on_fail,
+    )
     run_tag = time.strftime("%Y%m%d_%H%M%S")
     out_dir = os.path.join(
         args.results_dir,
-        f"bvp1d_k{args.wavenumber:g}_boxcox_2darch_{args.qn_variant}_{run_tag}",
+        f"bvp1d_k{args.wavenumber:g}_boxcox_2darch_{args.qn_variant}"
+        f"_ls-{ls.tag}_{run_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -643,6 +729,7 @@ def main(argv: list[str] | None = None) -> None:
         f"\n1D BVP Box-Cox sweep (2D protocol) "
         f"(k={args.wavenumber:g}, net={arch}, "
         f"n_collocation={args.n_collocation}, qn={args.qn_variant}, "
+        f"line_search={ls.tag}, "
         f"epochs={args.epochs}, adam={args.adam_epochs})\n"
         f"  lambdas: {lambdas}\n"
         f"  seeds:   {seeds}\n"
@@ -663,6 +750,7 @@ def main(argv: list[str] | None = None) -> None:
         plateau_min_delta=args.plateau_min_delta,
         diag_grid_n=args.diag_grid_n,
         patience=args.patience,
+        ls=ls,
     )
 
     write_summary(
@@ -675,6 +763,7 @@ def main(argv: list[str] | None = None) -> None:
         n_collocation=args.n_collocation,
         seeds=seeds,
         rel_l2_threshold=args.success_rel_l2_threshold,
+        line_search_tag=ls.tag,
     )
     plot_sweep(
         results=results,

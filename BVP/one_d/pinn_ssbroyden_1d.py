@@ -121,6 +121,18 @@ class PINN_BVP_SSBroyden:
         rel_err_eps: float = 1e-12,
         qn_variant: str = "ssbroyden",
         qn_H_on_cpu: bool = False,
+        # ---- quasi-Newton line-search configuration ----
+        # Defaults reproduce the historical hard-coded values exactly, so any
+        # caller that does not set these gets the original Armijo + H-reset
+        # behaviour. The line-search ablation sweep overrides them to push the
+        # baseline optimiser from "strong_wolfe" (Urban-faithful) down to a
+        # crippled "none" regime.
+        qn_line_search: "bool | str" = "armijo",
+        qn_c1: float = 1e-4,
+        qn_c2: float = 0.9,
+        qn_backtrack: float = 0.5,
+        qn_max_ls: int = 20,
+        qn_reset_on_fail: bool = True,
     ) -> None:
         self.model = model.to(device)
         self.k = float(k)
@@ -135,14 +147,15 @@ class PINN_BVP_SSBroyden:
             self.model.parameters(),
             variant=qn_variant,
             lr=1.0,
-            line_search=True,
-            c1=1e-4,
-            backtrack=0.5,
-            max_ls=20,
+            line_search=qn_line_search,
+            c1=qn_c1,
+            c2=qn_c2,
+            backtrack=qn_backtrack,
+            max_ls=qn_max_ls,
             damping=1e-12,
             tau_min=1e-6,
             tau_max=1.0,
-            reset_on_fail=True,
+            reset_on_fail=qn_reset_on_fail,
             H_on_cpu=qn_H_on_cpu,
         )
 
