@@ -45,7 +45,7 @@ import argparse
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import torch
@@ -725,6 +725,10 @@ def main(argv: list[str] | None = None) -> None:
         c2=args.c2,
         reset_on_fail=args.reset_on_fail,
     )
+    # The urban engine forces a strong-Wolfe search internally and ignores the
+    # line_search flag, so reflect that in every tag, label and directory name.
+    if args.engine == "urban":
+        ls = replace(ls, line_search="strong_wolfe")
     run_tag = time.strftime("%Y%m%d_%H%M%S")
     engine_tag = "urban_" if args.engine == "urban" else ""
     out_dir = os.path.join(

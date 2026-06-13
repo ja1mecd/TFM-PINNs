@@ -1,4 +1,0 @@
-Fine-grained Box-Cox sweep (1D BVP, k=4, qn=ssbroyden, epochs=5000, adam=2000, seeds=[46])
-
-  lambda             mean J           std J          mean solL2       std solL2       engaged
-     0.4         7.8852e+03      0.0000e+00          7.0744e-01      0.0000e+00     epoch~700

@@ -238,11 +238,15 @@ class VacuumGSPINN:
 
     # ---- diagnostics ----
     def _eval_grid(self, n: int) -> tuple[np.ndarray, np.ndarray, torch.Tensor]:
-        rs = np.linspace(R_LO, R_HI, n).astype(np.float32)
-        zs = np.linspace(Z_LO, Z_HI, n).astype(np.float32)
+        # Match the model dtype so the solution-error metric resolves below the
+        # float32 floor (~1e-7) when the network is run in double precision.
+        model_dtype = next(self.model.parameters()).dtype
+        np_dtype = np.float64 if model_dtype == torch.float64 else np.float32
+        rs = np.linspace(R_LO, R_HI, n).astype(np_dtype)
+        zs = np.linspace(Z_LO, Z_HI, n).astype(np_dtype)
         RR, ZZ = np.meshgrid(rs, zs, indexing="ij")
         flat = np.stack([RR.ravel(), ZZ.ravel()], axis=1)
-        return RR, ZZ, torch.from_numpy(flat).to(device)
+        return RR, ZZ, torch.from_numpy(flat).to(device=device, dtype=model_dtype)
 
     def compute_sol_l2(self, n: int = 200) -> tuple[float, float]:
         RR, ZZ, t = self._eval_grid(n)
@@ -713,17 +717,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--min-delta", type=float, default=1e-12)
     p.add_argument("--moving-avg-window", type=int, default=20)
     p.add_argument("--results-dir", type=str, default=os.path.join("..", "results"))
+    p.add_argument("--fp64", action="store_true",
+                   help="Run the network and residual in double precision. "
+                        "The exact solution R^2 lies in the ansatz space, so a "
+                        "float32 network reaches it to the single-precision "
+                        "floor and the solution error reads 0; fp64 resolves it.")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
+    if args.fp64:
+        # Global switch, so the Net weights and the torch.rand collocation grid
+        # are created in float64 along with the urban inverse-Hessian.
+        torch.set_default_dtype(torch.float64)
+
     run_tag = time.strftime("%Y%m%d_%H%M%S")
     engine_tag = "_urban" if args.engine == "urban" else ""
+    dtype_tag = "_fp64" if args.fp64 else ""
     out_dir = os.path.join(
         args.results_dir,
-        f"vacuum_gs_{args.qn_variant}{engine_tag}_{args.loss_transform}_{run_tag}",
+        f"vacuum_gs_{args.qn_variant}{engine_tag}{dtype_tag}_{args.loss_transform}_{run_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 

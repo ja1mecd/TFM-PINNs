@@ -135,6 +135,16 @@ def run_one(
     )
 
 
+def _effective_line_search(qn_engine: str, qn_line_search: str) -> str:
+    """Label the line search that actually ran.
+
+    The urban backend always uses a strong-Wolfe search and ignores the
+    ``qn_line_search`` flag, so summaries and tags must report ``strong_wolfe``
+    for it rather than echoing the unused (default ``armijo``) flag.
+    """
+    return "strong_wolfe" if qn_engine == "urban" else qn_line_search
+
+
 def run_sweep(
     lambdas: tuple[float, ...],
     seeds: tuple[int, ...],
@@ -166,7 +176,7 @@ def run_sweep(
             print(
                 f"\n[2DH lambda={lam:g}, seed={s}]  "
                 f"handover={handover_strategy}, qn_patience={patience}, "
-                f"ls={qn_line_search}"
+                f"ls={_effective_line_search(qn_engine, qn_line_search)}"
             )
             seed_runs.append(run_one(
                 lam=lam, seed=s,
@@ -418,6 +428,7 @@ def main(argv: list[str] | None = None) -> None:
 
     seeds = tuple(args.seeds)
     run_tag = time.strftime("%Y%m%d_%H%M%S")
+    ls_label = _effective_line_search(args.engine, args.qn_line_search)
     qn_tag = args.qn_variant
     if args.engine == "urban":
         qn_tag += "urban"
@@ -432,7 +443,7 @@ def main(argv: list[str] | None = None) -> None:
     print(
         f"\n2D Helmholtz Box-Cox sweep "
         f"((a1,a2)=({args.a1}, {args.a2}), k={args.k:g}, "
-        f"qn={args.qn_variant}, ls={args.qn_line_search}, "
+        f"qn={args.qn_variant}, ls={ls_label}, "
         f"epochs={args.epochs}, adam={args.adam_epochs})\n"
         f"  lambdas: {lambdas}\n"
         f"  seeds:   {seeds}\n"
@@ -466,7 +477,7 @@ def main(argv: list[str] | None = None) -> None:
         n_epochs=args.epochs, adam_epochs=args.adam_epochs,
         seeds=seeds,
         hidden=tuple(args.hidden),
-        qn_line_search=args.qn_line_search,
+        qn_line_search=ls_label,
         adam_schedule=args.adam_schedule,
     )
     plot_sweep(
