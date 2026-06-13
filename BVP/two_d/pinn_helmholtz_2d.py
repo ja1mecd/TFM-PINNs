@@ -1012,7 +1012,7 @@ class PINN_Helmholtz_Solver:
             self.sol_rel_l2.append(last_sol_rel_l2)
 
             if epoch == 1 or (epoch % verbose_freq == 0):
-                lr_now = opt.param_groups[0]["lr"]
+                lr_now = opt.param_groups[0].get("lr", float("nan"))
                 phase = "ADAM" if use_adam else self.quasi_newton.param_groups[0][
                     "variant"
                 ].upper()
