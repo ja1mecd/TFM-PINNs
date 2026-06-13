@@ -1,0 +1,92 @@
+Optimiser comparison (1D BVP, k=4, total_epochs=5000, adam_warmup=2000, seeds=[42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61])
+Success criterion: final relative L^2 error < 1.
+
+== Aggregate statistics over successful seeds (median / best run) ==
+            pipeline    n_succ        median J           min J      median solL2       min solL2      median relL2
+                adam    0/20              n/a             n/a               n/a             n/a               n/a
+           adam_bfgs    5/20       1.0193e-04      2.6743e-06        1.1354e-05      3.3988e-06        1.6057e-05
+         adam_ssbfgs    5/20       1.0350e-04      2.1307e-06        1.5467e-05      5.7801e-06        2.1873e-05
+      adam_ssbroyden   10/20       2.5588e-04      1.1764e-06        9.5448e-05      9.5507e-06        1.3498e-04
+
+== Per-seed final metrics (all runs, including failures) ==
+            pipeline    seed         final J     final solL2     final relL2  status
+                adam      42      8.6158e+03      1.9969e+00      2.8240e+00  FAIL
+                adam      43      5.6920e+03      1.9530e+00      2.7620e+00  FAIL
+                adam      44      6.4068e+03      1.7425e+00      2.4642e+00  FAIL
+                adam      45      5.6097e+03      1.8032e+00      2.5501e+00  FAIL
+                adam      46      6.2543e+03      1.5500e+00      2.1920e+00  FAIL
+                adam      47      7.1642e+03      1.4840e+00      2.0987e+00  FAIL
+                adam      48      7.0719e+03      1.6057e+00      2.2709e+00  FAIL
+                adam      49      7.6254e+03      1.6745e+00      2.3681e+00  FAIL
+                adam      50      1.3025e+04      1.5342e+00      2.1698e+00  FAIL
+                adam      51      7.2978e+03      1.5983e+00      2.2604e+00  FAIL
+                adam      52      6.3226e+03      1.5899e+00      2.2485e+00  FAIL
+                adam      53      6.7344e+03      1.7708e+00      2.5043e+00  FAIL
+                adam      54      5.4478e+03      1.9916e+00      2.8165e+00  FAIL
+                adam      55      7.2653e+03      1.7011e+00      2.4058e+00  FAIL
+                adam      56      7.2124e+03      1.6475e+00      2.3299e+00  FAIL
+                adam      57      7.2319e+03      1.6275e+00      2.3017e+00  FAIL
+                adam      58      7.0989e+03      1.8090e+00      2.5583e+00  FAIL
+                adam      59      6.9883e+03      1.6780e+00      2.3730e+00  FAIL
+                adam      60      6.8025e+03      1.8286e+00      2.5860e+00  FAIL
+                adam      61      8.1794e+03      1.7297e+00      2.4462e+00  FAIL
+           adam_bfgs      42      1.0413e+07      4.9162e+00      6.9526e+00  FAIL
+           adam_bfgs      43      1.1453e+08      1.8310e+01      2.5894e+01  FAIL
+           adam_bfgs      44      1.0365e+06      2.8644e+00      4.0508e+00  FAIL
+           adam_bfgs      45      4.7554e+04      7.7482e+00      1.0958e+01  FAIL
+           adam_bfgs      46      4.9634e+07      2.6554e+00      3.7553e+00  FAIL
+           adam_bfgs      47      1.9114e+06      6.0527e+00      8.5598e+00  FAIL
+           adam_bfgs      48      6.2436e+03      6.4509e+00      9.1230e+00  FAIL
+           adam_bfgs      49      1.2826e+06      3.4683e+00      4.9049e+00  FAIL
+           adam_bfgs      50      3.3519e+04      3.8260e+00      5.4108e+00  FAIL
+           adam_bfgs      51      2.6743e-06      3.3988e-06      4.8066e-06  ok
+           adam_bfgs      52      1.1402e+01      3.9217e-01      5.5461e-01  ok
+           adam_bfgs      53      1.1202e+09      1.0662e+01      1.5079e+01  FAIL
+           adam_bfgs      54      5.7538e+05      1.0645e+01      1.5054e+01  FAIL
+           adam_bfgs      55      2.7465e+06      1.2644e+01      1.7882e+01  FAIL
+           adam_bfgs      56      2.1563e+08      4.5229e+00      6.3963e+00  FAIL
+           adam_bfgs      57      4.0102e-04      1.1354e-05      1.6057e-05  ok
+           adam_bfgs      58      6.7344e+04      1.2428e+01      1.7576e+01  FAIL
+           adam_bfgs      59      1.1608e+06      1.2583e+01      1.7795e+01  FAIL
+           adam_bfgs      60      3.1389e-05      7.4354e-06      1.0515e-05  ok
+           adam_bfgs      61      1.0193e-04      4.8295e-05      6.8299e-05  ok
+         adam_ssbfgs      42      1.0488e+07      4.9074e+00      6.9402e+00  FAIL
+         adam_ssbfgs      43      1.1453e+08      1.8310e+01      2.5894e+01  FAIL
+         adam_ssbfgs      44      1.0365e+06      2.8644e+00      4.0508e+00  FAIL
+         adam_ssbfgs      45      4.7554e+04      7.7482e+00      1.0958e+01  FAIL
+         adam_ssbfgs      46      4.9634e+07      2.6554e+00      3.7553e+00  FAIL
+         adam_ssbfgs      47      1.9114e+06      6.0527e+00      8.5598e+00  FAIL
+         adam_ssbfgs      48      6.2436e+03      6.4509e+00      9.1230e+00  FAIL
+         adam_ssbfgs      49      1.2826e+06      3.4683e+00      4.9049e+00  FAIL
+         adam_ssbfgs      50      3.3519e+04      3.8260e+00      5.4108e+00  FAIL
+         adam_ssbfgs      51      2.1307e-06      5.7801e-06      8.1743e-06  ok
+         adam_ssbfgs      52      1.8774e+01      3.8083e-01      5.3858e-01  ok
+         adam_ssbfgs      53      1.1202e+09      1.0662e+01      1.5079e+01  FAIL
+         adam_ssbfgs      54      5.7538e+05      1.0645e+01      1.5054e+01  FAIL
+         adam_ssbfgs      55      2.7465e+06      1.2644e+01      1.7882e+01  FAIL
+         adam_ssbfgs      56      2.1563e+08      4.5229e+00      6.3963e+00  FAIL
+         adam_ssbfgs      57      1.1461e-04      1.5467e-05      2.1873e-05  ok
+         adam_ssbfgs      58      6.7344e+04      1.2428e+01      1.7576e+01  FAIL
+         adam_ssbfgs      59      1.1608e+06      1.2583e+01      1.7795e+01  FAIL
+         adam_ssbfgs      60      3.1367e-05      1.1817e-05      1.6711e-05  ok
+         adam_ssbfgs      61      1.0350e-04      4.4934e-05      6.3546e-05  ok
+      adam_ssbroyden      42      4.3606e-05      2.1501e-05      3.0408e-05  ok
+      adam_ssbroyden      43      3.6766e+06      1.1340e+01      1.6037e+01  FAIL
+      adam_ssbroyden      44      2.5723e+05      2.6735e+00      3.7809e+00  FAIL
+      adam_ssbroyden      45      4.2797e+06      4.8548e-01      6.8657e-01  ok
+      adam_ssbroyden      46      3.1893e+04      9.9646e+00      1.4092e+01  FAIL
+      adam_ssbroyden      47      5.3225e-04      1.0241e-04      1.4483e-04  ok
+      adam_ssbroyden      48      8.1574e+04      1.0196e+00      1.4419e+00  FAIL
+      adam_ssbroyden      49      1.5280e+04      8.7039e-01      1.2309e+00  FAIL
+      adam_ssbroyden      50      1.2025e-03      2.7438e-04      3.8803e-04  ok
+      adam_ssbroyden      51      1.5868e-02      7.8596e-04      1.1115e-03  ok
+      adam_ssbroyden      52      2.3772e-04      5.1618e-05      7.2999e-05  ok
+      adam_ssbroyden      53      1.2366e+08      5.7070e+00      8.0709e+00  FAIL
+      adam_ssbroyden      54      1.5520e+05      2.1328e+00      3.0163e+00  FAIL
+      adam_ssbroyden      55      2.7404e-04      3.6288e-04      5.1319e-04  ok
+      adam_ssbroyden      56      2.1888e-04      8.8488e-05      1.2514e-04  ok
+      adam_ssbroyden      57      7.8797e+04      5.5667e+00      7.8725e+00  FAIL
+      adam_ssbroyden      58      4.9174e-05      9.5507e-06      1.3507e-05  ok
+      adam_ssbroyden      59      1.1764e-06      1.1393e-05      1.6113e-05  ok
+      adam_ssbroyden      60      2.0616e+05      6.9160e+00      9.7807e+00  FAIL
+      adam_ssbroyden      61      1.5741e+05      2.0120e+00      2.8454e+00  FAIL

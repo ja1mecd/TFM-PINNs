@@ -1,0 +1,20 @@
+{
+  "problem": "Vacuum Grad-Shafranov psi=R^2 on [1.0,2.0]x[-1.0,1.0]",
+  "qn_variant": "ssbroyden",
+  "qn_engine": "urban",
+  "n_epochs": 10000,
+  "adam_epochs": 2000,
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "means": {
+    "final_J_val_mean": 1.7934073370604274e-12,
+    "final_J_val_std": 1.819536643987378e-12,
+    "final_sol_l2_mean": 0.0,
+    "final_sol_l2_std": 0.0,
+    "final_rel_l2_mean": 0.0,
+    "final_rel_l2_std": 0.0
+  }
+}

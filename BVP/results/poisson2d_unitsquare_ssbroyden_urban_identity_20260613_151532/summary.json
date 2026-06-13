@@ -1,0 +1,20 @@
+{
+  "problem": "2D Poisson on (0,1)^2, hard Dirichlet ansatz",
+  "qn_variant": "ssbroyden",
+  "qn_engine": "urban",
+  "n_epochs": 10000,
+  "adam_epochs": 2000,
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "means": {
+    "final_J_val_mean": 1.962711243530535e-10,
+    "final_J_val_std": 8.388018442674336e-11,
+    "final_sol_l2_mean": 6.990489225077774e-08,
+    "final_sol_l2_std": 3.893434288132759e-09,
+    "final_rel_l2_mean": 1.3980978450127586e-07,
+    "final_rel_l2_std": 7.78686857624994e-09
+  }
+}

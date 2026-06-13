@@ -1,0 +1,38 @@
+{
+  "problem": "2DH (Urban et al. 2025, sec. 5)",
+  "qn_variant": "SSBroyden2",
+  "loss_transform": "identity",
+  "loss_lambda": 0.5,
+  "loss_eps": 1e-12,
+  "lambda_pde": 1.0,
+  "lambda_history": [],
+  "a1_wavenumber": 1,
+  "a2_wavenumber": 4,
+  "k_wavenumber": 1.0,
+  "domain": {
+    "x": [
+      -1.0,
+      1.0
+    ],
+    "y": [
+      -1.0,
+      1.0
+    ]
+  },
+  "n_epochs_run": 3861,
+  "best_val_objective_ma": 6.002773233149128e-07,
+  "final_obj_train": 5.464643777486344e-07,
+  "final_obj_val": 6.002544523653341e-07,
+  "final_J_train": 5.465874437504681e-07,
+  "final_J_val": 6.002544523653341e-07,
+  "final_pde_l2": 0.0007721004622363919,
+  "final_sol_l2": 1.6684974606432404e-05,
+  "final_sol_rel_l2": 1.6684974589764575e-05,
+  "max_abs_err": 1.2281925592105836e-05,
+  "mean_abs_err": 8.280924703285564e-06,
+  "device": "cuda",
+  "torch_version": "1.13.1+cu117",
+  "run_name": "helmholtz_low_ssbroyden_urban_identity_20260613_150805",
+  "run_tag": "20260613_150805",
+  "qn_engine": "urban"
+}
