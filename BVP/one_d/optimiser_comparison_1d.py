@@ -146,6 +146,7 @@ def run_pipeline_once(
     es_min_delta: float = 1e-4,
     es_stop_loss: float = 0.0,
     qn_engine: str = "inhouse",
+    qn_initial_scale: bool = False,
 ) -> SeedRun:
     if pipeline not in PIPELINES:
         raise ValueError(f"unknown pipeline {pipeline!r}; valid: {PIPELINES}")
@@ -166,6 +167,7 @@ def run_pipeline_once(
             loss_transform="identity",
             qn_variant="ssbroyden",  # never reached
             qn_engine=qn_engine,
+            qn_initial_scale=qn_initial_scale,
         )
         pinn.train(
             n_epochs=total_epochs,
@@ -190,6 +192,7 @@ def run_pipeline_once(
             loss_transform="identity",
             qn_variant=qn,
             qn_engine=qn_engine,
+            qn_initial_scale=qn_initial_scale,
         )
         pinn.train(
             n_epochs=total_epochs,
@@ -247,6 +250,7 @@ def run_comparison(
     es_min_delta: float = 1e-4,
     es_stop_loss: float = 0.0,
     qn_engine: str = "inhouse",
+    qn_initial_scale: bool = False,
 ) -> tuple[PipelineResult, ...]:
     results: list[PipelineResult] = []
     for p in pipelines:
@@ -273,6 +277,7 @@ def run_comparison(
                 es_min_delta=es_min_delta,
                 es_stop_loss=es_stop_loss,
                 qn_engine=qn_engine,
+                qn_initial_scale=qn_initial_scale,
             )
             runs.append(run)
         results.append(PipelineResult(pipeline=p, seeds=tuple(runs)))
@@ -661,6 +666,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "'urban' (float64 dense Hessian + strong-Wolfe line search).",
     )
     p.add_argument(
+        "--initial-scale", dest="initial_scale", action="store_true",
+        help="Enable Urban's Oren-Luenberger initial Hessian scaling (urban "
+             "engine only). OFF by default so the legacy "
+             "bvp1d_k4_optim_compare_urban_20260613_152100 run reproduces "
+             "byte-for-byte; pass this flag for the Urban-faithful re-run "
+             "where SSBroyden gets its initial scaling on every fresh H.",
+    )
+    p.set_defaults(initial_scale=False)
+    p.add_argument(
         "--results-dir",
         type=str,
         default=os.path.join("..", "results"),
@@ -683,9 +697,10 @@ def main(argv: list[str] | None = None) -> None:
 
     run_tag = time.strftime("%Y%m%d_%H%M%S")
     engine_tag = "_urban" if args.engine == "urban" else ""
+    iscale_tag = "_iscale" if args.initial_scale else ""
     out_dir = os.path.join(
         args.results_dir,
-        f"bvp1d_k{args.wavenumber:g}_optim_compare{engine_tag}_{run_tag}",
+        f"bvp1d_k{args.wavenumber:g}_optim_compare{engine_tag}{iscale_tag}_{run_tag}",
     )
     os.makedirs(out_dir, exist_ok=True)
 
@@ -696,6 +711,7 @@ def main(argv: list[str] | None = None) -> None:
         f"adam_warmup={args.adam_warmup}).\n"
         f"  pipelines:           {args.pipelines}\n"
         f"  seeds:               {args.seeds}\n"
+        f"  engine:              {args.engine} (initial_scale={args.initial_scale})\n"
         f"  handover_strategy:   {args.handover_strategy}\n"
         f"  early-stop patience: {patience} (== total_epochs => disabled)\n"
     )
@@ -720,6 +736,7 @@ def main(argv: list[str] | None = None) -> None:
         es_min_delta=args.es_min_delta,
         es_stop_loss=args.es_stop_loss,
         qn_engine=args.engine,
+        qn_initial_scale=args.initial_scale,
     )
 
     write_summary(
