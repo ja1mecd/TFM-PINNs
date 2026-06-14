@@ -318,6 +318,7 @@ def plot_comparison(
     adam_warmup: int,
     rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
     figsize: tuple[float, float] = (14.0, 10.0),
+    problem_label: str | None = None,
 ) -> None:
     """Compose the four-panel figure using only successful seeds.
 
@@ -326,8 +327,12 @@ def plot_comparison(
     annotated as such in the legend and in the bar panels but contribute no
     line or bar height, so the comparison only reflects runs that actually
     trained. ``figsize`` keeps the 2x2 grid but lets callers pick a portrait
-    geometry for full-page thesis rendering.
+    geometry for full-page thesis rendering. ``problem_label`` overrides the
+    ``k=...`` tag in the residual-panel title for problems that are not
+    parametrised by a wavenumber (e.g. the 2D Poisson benchmark); when
+    ``None`` the legacy ``(k={k})`` title is kept byte-for-byte.
     """
+    residual_tag = f"k={k:g}" if problem_label is None else problem_label
     fig, ax = plt.subplots(2, 2, figsize=figsize)
 
     success_counts: dict[str, tuple[int, int]] = {}
@@ -378,7 +383,7 @@ def plot_comparison(
     ax[0, 0].set_xlabel("Epoch")
     ax[0, 0].set_ylabel(r"$\mathcal{J}_{\mathrm{val}}$ (median, IQR shaded)")
     ax[0, 0].set_title(
-        f"Validation residual MSE (k={k:g});\nsuccessful seeds only "
+        f"Validation residual MSE ({residual_tag});\nsuccessful seeds only "
         f"(rel.$L^2<{rel_l2_threshold:g}$)"
     )
     ax[0, 0].grid(True, alpha=0.3)
@@ -525,13 +530,17 @@ def write_summary(
     adam_warmup: int,
     seeds: tuple[int, ...],
     rel_l2_threshold: float = SUCCESS_REL_L2_DEFAULT,
+    problem_label: str | None = None,
 ) -> None:
     """Write a two-section summary: success counts + conditional stats over
     successful seeds, then the per-seed final metrics so failed runs remain
-    auditable in the artefact."""
+    auditable in the artefact. ``problem_label`` overrides the ``1D BVP, k=...``
+    header tag for non-wavenumber benchmarks; ``None`` keeps the legacy header.
+    """
+    header_tag = f"1D BVP, k={k:g}" if problem_label is None else problem_label
     lines: list[str] = []
     lines.append(
-        f"Optimiser comparison (1D BVP, k={k:g}, total_epochs={total_epochs}, "
+        f"Optimiser comparison ({header_tag}, total_epochs={total_epochs}, "
         f"adam_warmup={adam_warmup}, seeds={list(seeds)})\n"
     )
     lines.append(

@@ -412,6 +412,10 @@ class SSBroydenUrbanOptimizer(optim.Optimizer):
         self._H: torch.Tensor | None = None
         self._H_device = H_device
         self._H_dtype = dtype
+        # True whenever H == I (first step or just after a reset). Urban's
+        # initial-scaling branch keys off `np.allclose(Hk, I)`, so this flag
+        # must track every reset, not just step 0.
+        self._H_is_fresh = False
         self._n_steps = 0
         self._n_resets = 0
         self._n_ls_failures = 0
@@ -475,6 +479,7 @@ class SSBroydenUrbanOptimizer(optim.Optimizer):
         else:
             dev = next(self._params()).device
         self._H = torch.eye(n, device=dev, dtype=self._H_dtype)
+        self._H_is_fresh = True
         self._n_resets += 1
 
     @torch.no_grad()
@@ -499,6 +504,7 @@ class SSBroydenUrbanOptimizer(optim.Optimizer):
                 self.reset_H(n=n, ref=H_warm)
                 return False
         self._H = H_sym.to(dtype=self._H_dtype)
+        self._H_is_fresh = False
         return True
 
     # ----- main step -----
@@ -605,10 +611,13 @@ class SSBroydenUrbanOptimizer(optim.Optimizer):
             return torch.as_tensor(f_new, dtype=loss_t.dtype, device=loss_t.device)
 
         # Helper: identity-check matches Urban's `np.allclose(Hk, np.eye(N))`.
-        is_identity = (
-            initial_scale
-            and self._n_steps == 0  # cheap and reliable proxy
-        )
+        # H is fresh (== I) on the first step and after every reset_H, which
+        # fires on a line-search failure or a degenerate curvature pair. The
+        # initial Oren-Luenberger scaling must therefore re-apply on each of
+        # those, not only at step 0 (the old `_n_steps == 0` proxy missed all
+        # mid-run resets and left H badly scaled, which on the stiff PINN
+        # residuals let the next step diverge).
+        is_identity = initial_scale and self._H_is_fresh
 
         # Compute and apply the variant-specific update.
         H = self._update_H(
@@ -631,6 +640,7 @@ class SSBroydenUrbanOptimizer(optim.Optimizer):
 
         # Symmetrise to fight numerical drift over many steps.
         self._H = 0.5 * (H + H.t())
+        self._H_is_fresh = False
         self._n_steps += 1
 
         return torch.as_tensor(f_new, dtype=loss_t.dtype, device=loss_t.device)
